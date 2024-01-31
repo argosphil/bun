@@ -5887,8 +5887,11 @@ pub const NodeFS = struct {
         const watcher = args.createFSWatcher() catch |err| {
             const buf = std.fmt.allocPrint(bun.default_allocator, "{s} watching {}", .{ @errorName(err), bun.fmt.QuotedFormatter{ .text = args.path.slice() } }) catch unreachable;
             defer bun.default_allocator.free(buf);
+
             args.global_this.throwValue((JSC.SystemError{
                 .message = bun.String.init(buf),
+                .code = bun.String.init(@errorName(err)),
+                .syscall = bun.String.static("watch"),
                 .path = bun.String.init(args.path.slice()),
             }).toErrorInstance(args.global_this));
             return Maybe(Return.Watch){ .result = JSC.JSValue.undefined };
