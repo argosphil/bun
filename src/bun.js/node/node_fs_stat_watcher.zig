@@ -457,6 +457,7 @@ pub const StatWatcher = struct {
         if (bun.strings.startsWith(slice, "file://")) {
             slice = slice[6..];
         }
+
         var parts = [_]string{slice};
         const file_path = Path.joinAbsStringBuf(
             Fs.FileSystem.instance.top_level_dir,
