@@ -1,40 +1,55 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const bun = @import("root").bun;
-const strings = bun.strings;
-const string = bun.string;
-const JSC = @import("root").bun.JSC;
-const PathString = JSC.PathString;
-const Environment = bun.Environment;
-const C = bun.C;
-const Syscall = bun.sys;
-const os = std.os;
-pub const Buffer = JSC.MarkedArrayBuffer;
-const IdentityContext = @import("../../identity_context.zig").IdentityContext;
-const logger = @import("root").bun.logger;
+const heap_allocator = bun.default_allocator;
+const is_bindgen: bool = std.meta.globalOption("bindgen", bool) orelse false;
+const logger = bun.logger;
 const Fs = @import("../../fs.zig");
+const IdentityContext = @import("../../identity_context.zig").IdentityContext;
 const URL = @import("../../url.zig").URL;
 const Shimmer = @import("../bindings/shimmer.zig").Shimmer;
-const is_bindgen: bool = std.meta.globalOption("bindgen", bool) orelse false;
-const resolve_path = @import("../../resolver/resolve_path.zig");
 const meta = bun.meta;
+const os = std.os;
+const path_handler = bun.path;
+const strings = bun.strings;
+const string = bun.string;
+const validators = @import("./util/validators.zig");
+const validateObject = validators.validateObject;
+const validateString = validators.validateString;
+
+const C = bun.C;
+const L = strings.literal;
+const Environment = bun.Environment;
+const JSC = bun.JSC;
+const Mode = bun.Mode;
+const PathBuffer = bun.PathBuffer;
+const PathString = bun.PathString;
+const Syscall = bun.sys;
+const Value = std.json.Value;
+
+const stack_fallback_size_small = switch(Environment.os) {
+  // Up to 4 KB, instead of MAX_PATH_BYTES which is 96kb on Windows, ouch!
+  .windows => 4096, 
+  else => bun.MAX_PATH_BYTES
+};
+
+const stack_fallback_size_large = 32 * @sizeOf(string); // up to 32 strings on the stack
+
+pub const Buffer = JSC.MarkedArrayBuffer;
 
 /// On windows, this is what libuv expects
 /// On unix it is what the utimens api expects
 pub const TimeLike = if (Environment.isWindows) f64 else std.os.timespec;
-
-const Mode = bun.Mode;
-const heap_allocator = bun.default_allocator;
 
 pub const Flavor = enum {
     sync,
     promise,
     callback,
 
-    pub fn Wrap(comptime this: Flavor, comptime Type: type) type {
+    pub fn Wrap(comptime this: Flavor, comptime T: type) type {
         return comptime brk: {
             switch (this) {
-                .sync => break :brk Type,
+                .sync => break :brk T,
                 // .callback => {
                 //     const Callback = CallbackTask(Type);
                 // },
@@ -513,14 +528,13 @@ pub const Encoding = enum(u8) {
             },
             .hex => {
                 var buf: [size * 4]u8 = undefined;
-                const out = std.fmt.bufPrint(&buf, "{}", .{std.fmt.fmtSliceHexLower(input)}) catch unreachable;
+                const out = std.fmt.bufPrint(&buf, "{}", .{std.fmt.fmtSliceHexLower(input)}) catch bun.outOfMemory();
                 const result = JSC.ZigString.init(out).toValueGC(globalThis);
                 return result;
             },
             .buffer => {
                 return JSC.ArrayBuffer.createBuffer(globalThis, input);
             },
-
             inline else => |enc| {
                 const res = JSC.WebCore.Encoder.toString(input.ptr, size, globalThis, enc);
                 if (res.isError()) {
@@ -551,7 +565,7 @@ pub const Encoding = enum(u8) {
             },
             .hex => {
                 var buf: [max_size * 4]u8 = undefined;
-                const out = std.fmt.bufPrint(&buf, "{}", .{std.fmt.fmtSliceHexLower(input)}) catch unreachable;
+                const out = std.fmt.bufPrint(&buf, "{}", .{std.fmt.fmtSliceHexLower(input)}) catch bun.outOfMemory();
                 const result = JSC.ZigString.init(out).toValueGC(globalThis);
                 return result;
             },
@@ -560,7 +574,6 @@ pub const Encoding = enum(u8) {
             },
             inline else => |enc| {
                 const res = JSC.WebCore.Encoder.toString(input.ptr, input.len, globalThis, enc);
-
                 if (res.isError()) {
                     globalThis.throwValue(res);
                     return .zero;
@@ -597,7 +610,7 @@ pub fn CallbackTask(comptime Result: type) type {
 }
 
 pub const PathLike = union(enum) {
-    string: bun.PathString,
+    string: PathString,
     buffer: Buffer,
     slice_with_underlying_string: bun.SliceWithUnderlyingString,
     threadsafe_string: bun.SliceWithUnderlyingString,
@@ -654,12 +667,12 @@ pub const PathLike = union(enum) {
         };
     }
 
-    pub fn sliceZWithForceCopy(this: PathLike, buf: *[bun.MAX_PATH_BYTES]u8, comptime force: bool) [:0]const u8 {
+    pub fn sliceZWithForceCopy(this: PathLike, buf: *PathBuffer, comptime force: bool) [:0]const u8 {
         const sliced = this.slice();
 
         if (Environment.isWindows) {
             if (std.fs.path.isAbsolute(sliced)) {
-                return resolve_path.PosixToWinNormalizer.resolveCWDWithExternalBufZ(buf, sliced) catch @panic("Error while resolving path.");
+                return path_handler.PosixToWinNormalizer.resolveCWDWithExternalBufZ(buf, sliced) catch @panic("Error while resolving path.");
             }
         }
 
@@ -671,20 +684,27 @@ pub const PathLike = union(enum) {
             }
         }
 
-        @memcpy(buf[0..sliced.len], sliced);
+        @memcpy(buf[0 ..sliced.len], sliced);
         buf[sliced.len] = 0;
-        return buf[0..sliced.len :0];
+        return buf[0 ..sliced.len :0];
     }
 
-    pub inline fn sliceZ(this: PathLike, buf: *[bun.MAX_PATH_BYTES]u8) [:0]const u8 {
+    pub inline fn sliceZ(this: PathLike, buf: *PathBuffer) [:0]const u8 {
+        if (comptime Environment.isWindows) {
+            const data = this.slice();
+            if (!std.fs.path.isAbsolute(data)) {
+                return sliceZWithForceCopy(this, buf, false);
+            }
+            return path_handler.PosixToWinNormalizer.resolveCWDWithExternalBufZ(buf, data) catch @panic("Error while resolving path.");
+        }
         return sliceZWithForceCopy(this, buf, false);
     }
 
-    pub inline fn sliceW(this: PathLike, buf: *[bun.MAX_PATH_BYTES]u8) [:0]const u16 {
+    pub inline fn sliceW(this: PathLike, buf: *PathBuffer) [:0]const u16 {
         return bun.strings.toWPath(@alignCast(std.mem.bytesAsSlice(u16, buf)), this.slice());
     }
 
-    pub inline fn osPath(this: PathLike, buf: *[bun.MAX_PATH_BYTES]u8) bun.OSPathSliceZ {
+    pub inline fn osPath(this: PathLike, buf: *PathBuffer) bun.OSPathSliceZ {
         if (comptime Environment.isWindows) {
             return sliceW(this, buf);
         }
@@ -940,7 +960,7 @@ pub const VectorArrayBuffer = struct {
 pub const ArgumentsSlice = struct {
     remaining: []const JSC.JSValue,
     vm: *JSC.VirtualMachine,
-    arena: @import("root").bun.ArenaAllocator = @import("root").bun.ArenaAllocator.init(bun.default_allocator),
+    arena: bun.ArenaAllocator = bun.ArenaAllocator.init(bun.default_allocator),
     all: []const JSC.JSValue,
     threw: bool = false,
     protected: std.bit_set.IntegerBitSet(32) = std.bit_set.IntegerBitSet(32).initEmpty(),
@@ -981,7 +1001,7 @@ pub const ArgumentsSlice = struct {
             .remaining = arguments,
             .vm = vm,
             .all = arguments,
-            .arena = @import("root").bun.ArenaAllocator.init(vm.allocator),
+            .arena = bun.ArenaAllocator.init(vm.allocator),
         };
     }
 
@@ -1039,7 +1059,7 @@ pub fn timeLikeFromJS(globalThis: *JSC.JSGlobalObject, value: JSC.JSValue, _: JS
             return null;
         }
 
-        if (Environment.isWindows) {
+        if (comptime Environment.isWindows) {
             return milliseconds / 1000.0;
         }
 
@@ -1058,7 +1078,7 @@ pub fn timeLikeFromJS(globalThis: *JSC.JSGlobalObject, value: JSC.JSValue, _: JS
         return null;
     }
 
-    if (Environment.isWindows) {
+    if (comptime Environment.isWindows) {
         return seconds;
     }
 
@@ -1080,7 +1100,7 @@ pub fn modeFromJS(ctx: JSC.C.JSContextRef, value: JSC.JSValue, exception: JSC.C.
         //        the example), specifies permissions for the group. The right-most
         //        digit (5 in the example), specifies the permissions for others.
 
-        var zig_str = JSC.ZigString.init("");
+        var zig_str = JSC.ZigString.Empty;
         value.toZigString(&zig_str, ctx.ptr());
         var slice = zig_str.slice();
         if (strings.hasPrefix(slice, "0o")) {
@@ -1106,7 +1126,6 @@ pub const PathOrFileDescriptor = union(Tag) {
     path: PathLike,
 
     pub const Tag = enum { fd, path };
-
     pub const SerializeTag = enum(u8) { fd, path };
 
     /// This will unref() the path string if it is a PathLike.
@@ -1532,8 +1551,8 @@ pub fn StatType(comptime Big: bool) type {
             const cTime = stat_.ctime();
 
             return .{
-                .dev = if (Environment.isWindows) stat_.dev else @truncate(@as(i64, @intCast(stat_.dev))),
-                .ino = if (Environment.isWindows) stat_.ino else @truncate(@as(i64, @intCast(stat_.ino))),
+                .dev = if (comptime Environment.isWindows) stat_.dev else @truncate(@as(i64, @intCast(stat_.dev))),
+                .ino = if (comptime Environment.isWindows) stat_.ino else @truncate(@as(i64, @intCast(stat_.ino))),
                 .mode = @truncate(@as(i64, @intCast(stat_.mode))),
                 .nlink = @truncate(@as(i64, @intCast(stat_.nlink))),
                 .uid = @truncate(@as(i64, @intCast(stat_.uid))),
@@ -1557,7 +1576,7 @@ pub fn StatType(comptime Big: bool) type {
         }
 
         pub fn initWithAllocator(allocator: std.mem.Allocator, stat: bun.Stat) *This {
-            const this = allocator.create(This) catch unreachable;
+            const this = allocator.create(This) catch bun.outOfMemory();
             this.* = init(stat);
             return this;
         }
@@ -1835,548 +1854,2843 @@ pub const Emitter = struct {
 };
 
 pub const Path = struct {
+    const CHAR_BACKWARD_SLASH = '\\';
+    const CHAR_COLON = ':';
+    const CHAR_DOT = '.';
+    const CHAR_FORWARD_SLASH = '/';
+    const CHAR_QUESTION_MARK = '?';
+
+    const CHAR_STR_BACKWARD_SLASH = "\\";
+    const CHAR_STR_FORWARD_SLASH = "/";
+    const CHAR_STR_DOT = ".";
+
+    const StringBuilder = @import("../../string_builder.zig");
+
+    // varLenTmpBuf1, varLenTmpBuf2, and varLenTmpBuf3 can be expanded
+    // by path methods when they encounter larger strings.
+    var _varLenTmpBuf1: PathBuffer = undefined;
+    var _varLenTmpBuf2: PathBuffer = undefined;
+    var _varLenTmpBuf3: PathBuffer = undefined;
+
+    var varLenTmpBuf1: []u8 = &_varLenTmpBuf1;
+    var varLenTmpBuf2: []u8 = &_varLenTmpBuf2;
+    var varLenTmpBuf3: []u8 = &_varLenTmpBuf3;
+
+    var fixedLenTmpBuf1: PathBuffer = undefined;
+    var fixedLenTmpBuf2: PathBuffer = undefined;
+    var fixedLenTmpBuf3: PathBuffer = undefined;
+
+    /// Based on Node v21.6.1 path.parse:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L919
+    /// The structs returned by parse methods.
+    fn ParsedPath(comptime T: type) type {
+        return struct {
+            root: []const T,
+            dir: []const T,
+            base: []const T,
+            ext: []const T,
+            name: []const T,
+        };
+    }
+
+    pub const MAX_PATH_BYTES = bun.MAX_PATH_BYTES;
     pub const shim = Shimmer("Bun", "Path", @This());
     pub const name = "Bun__Path";
     pub const include = "Path.h";
     pub const namespace = shim.namespace;
-    const PathHandler = @import("../../resolver/resolve_path.zig");
-    const StringBuilder = @import("../../string_builder.zig");
-    pub const code = @embedFile("../path.exports.js");
+    pub const sep_posix = CHAR_FORWARD_SLASH;
+    pub const sep_windows = CHAR_BACKWARD_SLASH;
+    pub const sep_str_posix = CHAR_STR_FORWARD_SLASH;
+    pub const sep_str_windows = CHAR_STR_BACKWARD_SLASH;
+
+    /// Taken from Zig 0.11.0 zig/src/resinator/rc.zig
+    /// https://github.com/ziglang/zig/blob/776cd673f206099012d789fd5d05d49dd72b9faa/src/resinator/rc.zig#L266
+    ///
+    /// Compares ASCII values case-insensitively, non-ASCII values are compared directly
+    fn eqlIgnoreCaseT(comptime T: type, a: []const T, b: []const T) bool {
+        if (@TypeOf(T) != u16) {
+            return std.ascii.eqlIgnoreCase(a, b);
+        }
+        if (a.len != b.len) return false;
+        for (a, b) |a_c, b_c| {
+            if (a_c < 128) {
+                if (std.ascii.toLower(@intCast(a_c)) != std.ascii.toLower(@intCast(b_c))) return false;
+            } else {
+                if (a_c != b_c) return false;
+            }
+        }
+        return true;
+    }
+
+    /// Based on Node v21.6.1 private helper formatExt:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L130C10-L130C19
+    inline fn formatExtT(comptime T: type, ext: []const T, buf: []T) []const T {
+        const len = ext.len;
+        if (len == 0) {
+            return comptime L(T, "");
+        }
+        if (ext[0] == CHAR_DOT) {
+            return ext;
+        }
+        const bufSize = len + 1;
+        buf[0] = CHAR_DOT;
+        @memcpy(buf[1 ..bufSize], ext);
+        return buf[0 ..bufSize];
+    }
+
+    inline fn getCwd(buf: []u8) []const u8 {
+        const len = buf.len;
+        // Adopt the C idiom of indicating a fresh buffer
+        // with a null terminator since we're using Zig's std.c
+        buf[0] = 0;
+        // TODO: Handle error.
+        const res = std.c.getcwd(buf.ptr, buf.len);
+        return if (res != null) std.mem.sliceTo(res.?[0 ..len], 0) else "";
+    }
+
+    /// Caller must free returned memory.
+    fn getBufAlloc(allocator: std.mem.Allocator, len: usize) ![]u8 {
+        if (len > MAX_PATH_BYTES) {
+            const maybeBuf: ?[]u8 = allocator.alloc(u8, len) catch null;
+            const maybeTmpBuf1: ?[]u8 = allocator.alloc(u8, len) catch null;
+            const maybeTmpBuf2: ?[]u8 = allocator.alloc(u8, len) catch null;
+            const maybeTmpBuf3: ?[]u8 = allocator.alloc(u8, len) catch null;
+            if (maybeBuf == null or maybeTmpBuf1 == null or maybeTmpBuf2 == null) {
+                if (maybeBuf != null) allocator.free(maybeBuf.?);
+                if (maybeTmpBuf1 != null) allocator.free(maybeTmpBuf1.?);
+                if (maybeTmpBuf2 != null) allocator.free(maybeTmpBuf2.?);
+                if (maybeTmpBuf3 != null) allocator.free(maybeTmpBuf3.?);
+                return error.OutOfMemory;
+            }
+            varLenTmpBuf1 = maybeTmpBuf1.?;
+            varLenTmpBuf2 = maybeTmpBuf2.?;
+            varLenTmpBuf3 = maybeTmpBuf3.?;
+            return maybeBuf.?;
+        }
+        return allocator.alloc(u8, MAX_PATH_BYTES) catch bun.outOfMemory();
+    }
+
+    /// Based on Node v21.6.1 private helper posixCwd:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1074
+    inline fn posixCwd(buf: []u8) []const u8 {
+        const cwd = @This().getCwd(buf);
+        const len = cwd.len;
+        if (len == 0) {
+            return "";
+        }
+        if (comptime Environment.isWindows) {
+            // Converts Windows' backslash path separators to POSIX forward slashes
+            // and truncates any drive indicator
+
+            // Translated from the following JS code:
+            //   const cwd = StringPrototypeReplace(process.cwd(), regexp, '/');
+            for (0.. len) |i| {
+                if (cwd[i] == CHAR_BACKWARD_SLASH) {
+                    buf[i] = CHAR_FORWARD_SLASH;
+                } else {
+                    buf[i] = cwd[i];
+                }
+            }
+            var normalizedCwd = buf[0 ..len];
+
+            // Translated from the following JS code:
+            //   return StringPrototypeSlice(cwd, StringPrototypeIndexOf(cwd, '/'));
+            const index = std.mem.indexOfScalar(u8, normalizedCwd, CHAR_FORWARD_SLASH);
+            // Account for the -1 case of String#slice in JS land
+            return if (index != null) normalizedCwd[index.? ..len] else normalizedCwd[len - 1 ..len];
+        }
+
+        // We're already on POSIX, no need for any transformations
+        return cwd;
+    }
+
+    /// Taken from Zig 0.11.0 zig/src/resinator/rc.zig
+    /// https://github.com/ziglang/zig/blob/776cd673f206099012d789fd5d05d49dd72b9faa/src/resinator/rc.zig#L266
+    ///
+    /// Lowers ASCII values, non-ASCII values are returned directly
+    inline fn toLowerT(comptime T: type, a_c: T) T {
+        if (@TypeOf(T) != u16) {
+            return std.ascii.toLower(a_c);
+        }
+        return if (a_c < 128) @intCast(std.ascii.toLower(@intCast(a_c))) else a_c;
+    }
+
+    /// Based on Node v21.6.1 path.posix.basename:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1309
+    pub fn basenamePosixT(comptime T: type, path: []const T, suffix: ?[]const T) []const T {
+        // validateString of `path` is performed in fn pub basename.
+        const len = path.len;
+        // Exit early for easier number type use.
+        if (len == 0) {
+            return comptime L(T, "");
+        }
+        var start: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash: bool = true;
+
+        if (suffix != null and suffix.?.len > 0 and suffix.?.len <= len) {
+            const suffix_not_null = suffix.?;
+            if (std.mem.eql(T, suffix_not_null, path)) {
+                return comptime L(T, "");
+            }
+            // We use an optional value instead of -1, as in Node code, for easier number type use.
+            var extIdx: ?usize = suffix_not_null.len - 1;
+            // We use an optional value instead of -1, as in Node code, for easier number type use.
+            var firstNonSlashEnd: ?usize = null;
+            var i: usize = len - 1;
+            while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                const byte = path[i];
+                if (byte == CHAR_FORWARD_SLASH) {
+                    // If we reached a path separator that was not part of a set of path
+                    // separators at the end of the string, stop now
+                    if (!matchedSlash) {
+                        start = i + 1;
+                        break;
+                    }
+                } else {
+                    if (firstNonSlashEnd == null) {
+                        // We saw the first non-path separator, remember this index in case
+                        // we need it if the extension ends up not matching
+                        matchedSlash = false;
+                        firstNonSlashEnd = i + 1;
+                    }
+                    if (extIdx != null) {
+                        // Try to match the explicit extension
+                        if (byte == suffix_not_null[extIdx.?]) {
+                            if (extIdx.? == 0) {
+                                // We matched the extension, so mark this as the end of our path
+                                // component
+                                end = i;
+                                extIdx = null;
+                            } else {
+                                extIdx = extIdx.? - 1;
+                            }
+                        } else {
+                            // Extension does not match, so our result is the entire path
+                            // component
+                            extIdx = null;
+                            end = firstNonSlashEnd;
+                        }
+                    }
+                }
+            }
+
+            if (end == null) {
+                end = len;
+            } else if (start == end.?) {
+                end = firstNonSlashEnd;
+            }
+
+            return path[start ..end.?];
+        }
+
+        // Add a block to isolate `i`.
+        {
+            var i: usize = len - 1;
+            while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                const byte = path[i];
+                if (byte == CHAR_FORWARD_SLASH) {
+                    // If we reached a path separator that was not part of a set of path
+                    // separators at the end of the string, stop now
+                    if (!matchedSlash) {
+                        start = i + 1;
+                        break;
+                    }
+                } else if (end == null) {
+                    // We saw the first non-path separator, mark this as the end of our
+                    // path component
+                    matchedSlash = false;
+                    end = i + 1;
+                }
+            }
+        }
+
+        if (end == null) {
+            return comptime L(T, "");
+        }
+
+        return path[start ..end.?];
+    }
+
+    /// Based on Node v21.6.1 path.win32.basename:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L753
+    pub fn basenameWindowsT(comptime T: type, path: []const T, suffix: ?[]const T) []const T {
+        // validateString of `path` is performed in fn pub basename.
+        const len = path.len;
+        // Exit early for easier number type use.
+        if (len == 0) {
+            return comptime L(T, "");
+        }
+
+        const isSepT = @This().isSepWindowsT;
+
+        var start: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash: bool = true;
+
+        // Check for a drive letter prefix so as not to mistake the following
+        // path separator as an extra separator at the end of the path that can be
+        // disregarded
+        if (len >= 2 and @This().isWindowsDeviceRootT(T, path[0]) and path[1] == CHAR_COLON) {
+            start = 2;
+        }
+
+        if (suffix != null and suffix.?.len > 0 and suffix.?.len <= len) {
+            const suffix_not_null = suffix.?;
+            if (std.mem.eql(T, suffix_not_null, path)) {
+                return comptime L(T, "");
+            }
+            // We use an optional value instead of -1, as in Node code, for easier number type use.
+            var extIdx: ?usize = suffix_not_null.len - 1;
+            // We use an optional value instead of -1, as in Node code, for easier number type use.
+            var firstNonSlashEnd: ?usize = null;
+            var i: usize = len - 1;
+            while (i >= start) : (i -= if (i > 0) 1 else break) {
+                const byte = path[i];
+                if (isSepT(T, byte)) {
+                    // If we reached a path separator that was not part of a set of path
+                    // separators at the end of the string, stop now
+                    if (!matchedSlash) {
+                        start = i + 1;
+                        break;
+                    }
+                } else {
+                    if (firstNonSlashEnd == null) {
+                        // We saw the first non-path separator, remember this index in case
+                        // we need it if the extension ends up not matching
+                        matchedSlash = false;
+                        firstNonSlashEnd = i + 1;
+                    }
+                    if (extIdx != null) {
+                        // Try to match the explicit extension
+                        if (byte == suffix_not_null[extIdx.?]) {
+                            if (extIdx.? == 0) {
+                                // We matched the extension, so mark this as the end of our path
+                                // component
+                                end = i;
+                                extIdx = null;
+                            } else {
+                                extIdx = extIdx.? - 1;
+                            }
+                        } else {
+                            // Extension does not match, so our result is the entire path
+                            // component
+                            extIdx = null;
+                            end = firstNonSlashEnd;
+                        }
+                    }
+                }
+            }
+
+            if (end == null) {
+                end = len;
+            } else if (start == end.?) {
+                end = firstNonSlashEnd;
+            }
+
+            return path[start ..end.?];
+        }
+
+        // Add a block to isolate `i`.
+        {
+            var i: usize = len - 1;
+            while (i >= start) : (i -= if (i > 0) 1 else break) {
+                const byte = path[i];
+                if (isSepT(T, byte)) {
+                    if (!matchedSlash) {
+                        start = i + 1;
+                        break;
+                    }
+                } else if (end == null) {
+                    matchedSlash = false;
+                    end = i + 1;
+                }
+            }
+        }
+
+        if (end == null) {
+            return comptime L(T, "");
+        }
+
+        return path[start ..end.?];
+    }
+
+    pub inline fn basenamePosix(path: []const u8, suffix: ?[]const u8) []const u8 {
+        return basenamePosixT(u8, path, suffix);
+    }
+
+    pub inline fn basenameWindows(path: []const u8, suffix: ?[]const u8) []const u8 {
+        return basenameWindowsT(u8, path, suffix);
+    }
+
+    pub fn basename(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
+        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
+        const suffix_ptr: ?JSC.JSValue = if (args_len > 1) args_ptr[1] else null;
+
+        if (suffix_ptr != null) {
+            // Supress exeption in zig. It does throw in JS land.
+            validateString(globalThis, suffix_ptr.?, "ext", .{}) catch {
+                return JSC.JSValue.jsUndefined();
+            };
+        }
+
+        const path_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, path_ptr, "path", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
+
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
+
+        var path = path_ptr.toSlice(globalThis, allocator);
+        defer path.deinit();
+
+        if (suffix_ptr == null) {
+            const out =
+                if (!isWindows)
+                    @This().basenamePosix(path.slice(), null)
+                else
+                    @This().basenameWindows(path.slice(), null);
+            return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+        }
+
+        var suffix = suffix_ptr.?.toSlice(globalThis, allocator);
+        defer suffix.deinit();
+        const out =
+            if (!isWindows)
+                @This().basenamePosix(path.slice(), suffix.slice())
+            else
+                @This().basenameWindows(path.slice(), suffix.slice());
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+    }
 
     pub fn create(globalObject: *JSC.JSGlobalObject, isWindows: bool) callconv(.C) JSC.JSValue {
         return shim.cppFn("create", .{ globalObject, isWindows });
     }
 
-    pub fn basename(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
-        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0) {
-            return JSC.toInvalidArguments("path is required", .{}, globalThis);
-        }
-        var stack_fallback = std.heap.stackFallback(4096, JSC.getAllocator(globalThis));
-        const allocator = stack_fallback.get();
-
-        var arguments: []JSC.JSValue = args_ptr[0..args_len];
-        var path = arguments[0].toSlice(globalThis, allocator);
-
-        defer path.deinit();
-        var extname_ = if (args_len > 1) arguments[1].toSlice(globalThis, allocator) else JSC.ZigString.Slice.empty;
-        defer extname_.deinit();
-
-        const base_slice = path.slice();
-        var out: []const u8 = base_slice;
-
-        if (!isWindows) {
-            out = std.fs.path.basenamePosix(base_slice);
-        } else {
-            out = std.fs.path.basenameWindows(base_slice);
-        }
-        const ext = extname_.slice();
-
-        if ((ext.len != out.len or out.len == base_slice.len) and strings.endsWith(out, ext)) {
-            out = out[0 .. out.len - ext.len];
+    /// Based on Node v21.6.1 path.posix.dirname:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1278
+    pub fn dirnamePosixT(comptime T: type, path: []const T) []const T {
+        // validateString of `path` is performed in fn pub dirname.
+        const len = path.len;
+        if (len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
         }
 
-        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+        const hasRoot = path[0] == CHAR_FORWARD_SLASH;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash: bool = true;
+        var i: usize = len - 1;
+        while (i >= 1) : (i -= 1) {
+            if (path[i] == CHAR_FORWARD_SLASH) {
+                if (!matchedSlash) {
+                    end = i;
+                    break;
+                }
+            } else {
+                // We saw the first non-path separator
+                matchedSlash = false;
+            }
+        }
+
+        if (end == null) {
+            return if (hasRoot) 
+                comptime L(T, CHAR_STR_FORWARD_SLASH) 
+            else comptime L(T, CHAR_STR_DOT);
+        }
+
+        if (hasRoot and end != null and end.? == 1) {
+            return comptime L(T, "//");
+        }
+
+        return path[0 ..end.?];
     }
 
-    fn dirnameWindows(path: []const u8) []const u8 {
-        if (path.len == 0)
-            return ".";
-
-        const root_slice = std.fs.path.diskDesignatorWindows(path);
-        if (path.len == root_slice.len)
-            return root_slice;
-
-        const have_root_slash = path.len > root_slice.len and (path[root_slice.len] == '/' or path[root_slice.len] == '\\');
-
-        var end_index: usize = path.len - 1;
-
-        while (path[end_index] == '/' or path[end_index] == '\\') {
-            // e.g. '\\' => "\\"
-            if (end_index == 0) {
-                return path[0..1];
-            }
-            end_index -= 1;
+    /// Based on Node v21.6.1 path.win32.dirname:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L657
+    pub fn dirnameWindowsT(comptime T: type, path: []const T) []const T {
+        // validateString of `path` is performed in fn pub dirname.
+        const len = path.len;
+        if (len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
         }
 
-        while (path[end_index] != '/' and path[end_index] != '\\') {
-            if (end_index == 0) {
-                if (root_slice.len == 0) {
-                    return ".";
+        const isSepT = @This().isSepWindowsT;
+
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var rootEnd: ?usize = null;
+        var offset: usize = 0;
+        const byte0 = path[0];
+
+        if (len == 1) {
+            // `path` contains just a path separator, exit early to avoid
+            // unnecessary work or a dot.
+            return if (isSepT(T, byte0)) path else comptime L(T, CHAR_STR_DOT);
+        }
+
+        // Try to match a root
+        if (isSepT(T, byte0)) {
+            // Possible UNC root
+
+            rootEnd = 1;
+            offset = 1;
+
+            if (isSepT(T, path[1])) {
+                // Matched double path separator at the beginning
+                var j: usize = 2;
+                var last: usize = j;
+
+                // Match 1 or more non-path separators
+                while (j < len and !isSepT(T, path[j])) {
+                    j += 1;
                 }
-                if (have_root_slash) {
-                    // e.g. "c:\\" => "c:\\"
-                    return path[0 .. root_slice.len + 1];
-                } else {
-                    // e.g. "c:foo" => "c:"
-                    return root_slice;
+
+                if (j < len and j != last) {
+                    // Matched!
+                    last = j;
+
+                    // Match 1 or more path separators
+                    while (j < len and isSepT(T, path[j])) {
+                        j += 1;
+                    }
+
+                    if (j < len and j != last) {
+                        // Matched!
+                        last = j;
+
+                        // Match 1 or more non-path separators
+                        while (j < len and !isSepT(T, path[j])) {
+                            j += 1;
+                        }
+
+                        if (j == len) {
+                            // We matched a UNC root only
+                            return path;
+                        }
+
+                        if (j != last) {
+                            // We matched a UNC root with leftovers
+
+                            // Offset by 1 to include the separator after the UNC root to
+                            // treat it as a "normal root" on top of a (UNC) root
+                            rootEnd = j + 1;
+                            offset = rootEnd.?;
+                        }
+                    }
                 }
             }
-            end_index -= 1;
+        // Possible device root
+        } else if (@This().isWindowsDeviceRootT(T, byte0) and path[1] == CHAR_COLON) {
+            rootEnd = if (len > 2 and isSepT(T, path[2])) 3 else 2;
+            offset = rootEnd.?;
         }
 
-        if (have_root_slash and end_index == root_slice.len) {
-            end_index += 1;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash: bool = true;
+
+        var i: usize = len - 1;
+        while (i >= offset) :  (i -= if (i > 0) 1 else break) {
+            if (isSepT(T, path[i])) {
+                if (!matchedSlash) {
+                    end = i;
+                    break;
+                }
+            } else {
+                // We saw the first non-path separator
+                matchedSlash = false;
+            }
         }
 
-        return path[0..end_index];
+        if (end == null) {
+            if (rootEnd == null) {
+                return comptime L(T, CHAR_STR_DOT);
+            }
+
+            end = rootEnd.?;
+        }
+
+        return path[0 ..end.?];
     }
 
-    fn dirnamePosix(path: []const u8) []const u8 {
-        if (path.len == 0)
-            return ".";
+    pub inline fn dirnamePosix(path: []const u8) []const u8 {
+        return @This().dirnamePosixT(u8, path);
+    }
 
-        var end_index: usize = path.len - 1;
-
-        while (path[end_index] == '/') {
-            // e.g. "////" => "/"
-            if (end_index == 0) {
-                return "/";
-            }
-            end_index -= 1;
-        }
-
-        while (path[end_index] != '/') {
-            if (end_index == 0) {
-                // e.g. "a/", "a"
-                return ".";
-            }
-            end_index -= 1;
-        }
-
-        // e.g. "/a/" => "/"
-        if (end_index == 0 and path[0] == '/') {
-            return "/";
-        }
-
-        // "a/b" => "a" or "//b" => "//"
-        if (end_index <= 1) {
-            if (path[0] == '/' and path[1] == '/') {
-                end_index += 1;
-            }
-        }
-
-        return path[0..end_index];
+    pub inline fn dirnameWindows(path: []const u8) []const u8 {
+        return @This().dirnameWindowsT(u8, path);
     }
 
     pub fn dirname(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0) {
-            return JSC.toInvalidArguments("path is required", .{}, globalThis);
-        }
-        var stack_fallback = std.heap.stackFallback(4096, JSC.getAllocator(globalThis));
+        const path_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, path_ptr, "path", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
+
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
         const allocator = stack_fallback.get();
 
-        var arguments: []JSC.JSValue = args_ptr[0..args_len];
-        var path = arguments[0].toSlice(globalThis, allocator);
+        var path = path_ptr.toSlice(globalThis, allocator);
         defer path.deinit();
 
-        const base_slice = path.slice();
-
-        const out = if (isWindows)
-            @This().dirnameWindows(base_slice)
+        const out = if (!isWindows)
+            @This().dirnamePosix(path.slice())
         else
-            @This().dirnamePosix(base_slice);
+            @This().dirnameWindows(path.slice());
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+    }
+    
+    /// Based on Node v21.6.1 path.posix.extname:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1278
+    pub fn extnamePosixT(comptime T: type, path: []const T) []const T {
+        // validateString of `path` is performed in fn pub extname.
+        const len = path.len;
+        // Exit early for easier number type use.
+        if (len == 0) {
+            return comptime L(T, "");
+        }
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var startDot: ?usize = null;
+        var startPart: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash: bool = true;
+        // Track the state of characters (if any) we see before our first dot and
+        // after any path separator we find
+        
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var preDotState: ?usize = 0;
+        
+        var i: usize = len - 1;
+        while (i >= 0) : (i -= if (i > 0) 1 else break) {
+            const byte = path[i];
+            if (byte == CHAR_FORWARD_SLASH) {
+                // If we reached a path separator that was not part of a set of path
+                // separators at the end of the string, stop now
+                if (!matchedSlash) {
+                    startPart = i + 1;
+                    break;
+                }
+                continue;
+            }
+            
+            if (end == null) {
+                // We saw the first non-path separator, mark this as the end of our
+                // extension
+                matchedSlash = false;
+                end = i + 1;
+            }
+            
+            if (byte == CHAR_DOT) {
+                // If this is our first dot, mark it as the start of our extension
+                if (startDot == null) {
+                    startDot = i;
+                } else if (preDotState != null and preDotState.? != 1) {
+                    preDotState = 1;
+                }
+            } else if (startDot != null) {
+                // We saw a non-dot and non-path separator before our dot, so we should
+                // have a good chance at having a non-empty extension
+                preDotState = null;
+            }
+        }
 
+        if (startDot == null or
+                end == null or
+                // We saw a non-dot character immediately before the dot
+                (preDotState != null and preDotState.? == 0) or
+                // The (right-most) trimmed path component is exactly '..'
+                (preDotState != null and preDotState.? == 1 and
+                 startDot.? == end.? - 1 and
+                 startDot.? == startPart + 1)
+        ) {
+            return comptime L(T, "");
+        }
+
+        return path[startDot.? ..end.?];
+    }
+
+    /// Based on Node v21.6.1 path.win32.extname:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L840
+    pub fn extnameWindowsT(comptime T: type, path: []const T) []const T {
+        // validateString of `path` is performed in fn pub extname.
+        const len = path.len;
+        // Exit early for easier number type use.
+        if (len == 0) {
+            return comptime L(T, "");
+        }
+        var start: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var startDot: ?usize = null;
+        var startPart: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash: bool = true;
+        // Track the state of characters (if any) we see before our first dot and
+        // after any path separator we find
+        
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var preDotState: ?usize = 0;
+
+        // Check for a drive letter prefix so as not to mistake the following
+        // path separator as an extra separator at the end of the path that can be
+        // disregarded
+
+        if (len >= 2 and
+            path[1] == CHAR_COLON and
+            @This().isWindowsDeviceRootT(T, path[0])) {
+            start = 2;
+            startPart = start;
+        }
+
+        var i: usize = len - 1;
+        while (i >= start) : (i -= if (i > 0) 1 else break) {
+            const byte = path[i];
+            if (@This().isSepWindowsT(T, byte)) {
+                // If we reached a path separator that was not part of a set of path
+                // separators at the end of the string, stop now
+                if (!matchedSlash) {
+                    startPart = i + 1;
+                    break;
+                }
+                continue;
+            }
+            if (end == null) {
+                // We saw the first non-path separator, mark this as the end of our
+                // extension
+                matchedSlash = false;
+                end = i + 1;
+            }
+            if (byte == CHAR_DOT) {
+                // If this is our first dot, mark it as the start of our extension
+                if (startDot == null) {
+                    startDot = i;
+                } else if (preDotState != null and preDotState.? != 1) {
+                    preDotState = 1;
+                }
+            } else if (startDot != null) {
+                // We saw a non-dot and non-path separator before our dot, so we should
+                // have a good chance at having a non-empty extension
+                preDotState = null;
+            }
+        }
+
+        if (startDot == null or
+                end == null or
+                // We saw a non-dot character immediately before the dot
+                (preDotState != null and preDotState.? == 0) or
+                // The (right-most) trimmed path component is exactly '..'
+                (preDotState != null and preDotState.? == 1 and
+                 startDot.? == end.? - 1 and
+                 startDot.? == startPart + 1)
+        ) {
+            return comptime L(T, "");
+        }
+
+        return path[startDot.? ..end.?];
+    }
+
+    pub inline fn extnamePosix(path: []const u8) []const u8 {
+        return @This().extnamePosixT(u8, path);
+    }
+
+    pub inline fn extnameWindows(path: []const u8) []const u8 {
+        return @This().extnameWindowsT(u8, path);
+    }
+
+    pub fn extname(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
+        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
+        const path_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, path_ptr, "path", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
+        
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
+
+        var path = path_ptr.toSlice(globalThis, allocator);
+        defer path.deinit();
+
+        const out = if (!isWindows)
+            @This().extnamePosix(path.slice())
+        else
+            @This().extnameWindows(path.slice());
         return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
     }
 
-    pub fn extname(globalThis: *JSC.JSGlobalObject, _: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
-        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0) {
-            return JSC.toInvalidArguments("path is required", .{}, globalThis);
+    /// Based on Node v21.6.1 private helper _format:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L145
+    fn _format(comptime T: type, pathObject: ParsedPath(T), sep: T, buf: []T) []const T {
+        // validateObject of `pathObject` is performed in fn pub format.
+
+        const root = pathObject.root;
+        const dir = pathObject.dir;
+        const base = pathObject.base;
+        const ext = pathObject.ext;
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        const _name = pathObject.name;
+
+        // Translated from the following JS code:
+        //   const dir = pathObject.dir || pathObject.root;
+        const dirIsRoot = dir.len == 0 or std.mem.eql(u8, dir, root);
+        const dirOrRoot = if (dirIsRoot) root else dir;
+        const dirLen = dirOrRoot.len;
+
+        var bufSize: usize = 0;
+
+        // Translated from the following JS code:
+        //   const base = pathObject.base ||
+        //     `${pathObject.name || ''}${formatExt(pathObject.ext)}`;
+        var baseLen = base.len;
+        var baseOrNameExt = base;
+        if (baseLen > 0) {
+            @memcpy(buf[0 ..baseLen], base);
+        } else {
+            const formattedExt = @This().formatExtT(T, ext, buf);
+            const nameLen = _name.len;
+            const extLen = formattedExt.len;
+            if (extLen > 0) {
+                // Move all bytes to the right by nameLen
+                var i: usize = extLen - 1;
+                while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                    buf[i + nameLen] = formattedExt[i];
+                }
+            }
+            if (nameLen > 0) {
+                @memcpy(buf[0 ..nameLen], _name);
+            }
+            bufSize = nameLen + extLen;
+            if (bufSize > 0) {
+                baseOrNameExt = buf[0 ..bufSize];
+            }
         }
-        var stack_fallback = std.heap.stackFallback(4096, JSC.getAllocator(globalThis));
-        const allocator = stack_fallback.get();
-        var arguments: []JSC.JSValue = args_ptr[0..args_len];
 
-        var path = arguments[0].toSlice(globalThis, allocator);
-        defer path.deinit();
+        // Translated from the following JS code:
+        //   if (!dir) {
+        //     return base;
+        //   }
+        if (dirLen == 0) {
+            return baseOrNameExt;
+        }
+   
+        // Translated from the following JS code:
+        //   return dir === pathObject.root ? `${dir}${base}` : `${dir}${sep}${base}`;
+        baseLen = baseOrNameExt.len;
+        if (baseLen > 0) {
+            const moveBy = if (dirIsRoot) dirLen else dirLen + 1;
+            // Move all bytes to the right by baseOffset
+            var i: usize = baseLen - 1;
+            while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                buf[i + moveBy] = baseOrNameExt[i];
+            }
+        }
+        @memcpy(buf[0 ..dirLen], dirOrRoot);
+        bufSize = dirLen + baseLen;
+        if (!dirIsRoot) {
+            bufSize += 1;
+            buf[dirLen] = sep;
+        }
+        return buf[0 ..bufSize];
+    }
 
-        const base_slice = path.slice();
+    pub inline fn formatPosix(pathObject: ParsedPath(u8), buf: []u8) []const u8 {
+        return @This()._format(u8, pathObject, CHAR_FORWARD_SLASH, buf);
+    }
 
-        return JSC.ZigString.init(std.fs.path.extension(base_slice)).withEncoding().toValueGC(globalThis);
+    pub inline fn formatWindow(pathObject: ParsedPath(u8), buf: []u8) []const u8 {
+        return @This()._format(u8, pathObject, CHAR_BACKWARD_SLASH, buf);
     }
 
     pub fn format(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0) {
-            return JSC.toInvalidArguments("pathObject is required", .{}, globalThis);
-        }
-        var path_object: JSC.JSValue = args_ptr[0];
-        const js_type = path_object.jsType();
-        if (!js_type.isObject()) {
-            return JSC.toInvalidArguments("pathObject is required", .{}, globalThis);
-        }
+        const pathObject_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateObject(globalThis, pathObject_ptr, "pathObject", .{}, .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
 
-        var stack_fallback = std.heap.stackFallback(4096, JSC.getAllocator(globalThis));
-        var allocator = stack_fallback.get();
-        var dir = JSC.ZigString.Empty;
-        var name_ = JSC.ZigString.Empty;
-        var ext = JSC.ZigString.Empty;
-        var name_with_ext = JSC.ZigString.Empty;
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
 
-        var insert_separator = true;
-        if (path_object.getTruthy(globalThis, "dir")) |prop| {
-            prop.toZigString(&dir, globalThis);
+        var lenSum: usize = 0;
+
+        var root: []const u8 = "";
+        if (pathObject_ptr.getTruthy(globalThis, "root")) |jsValue| {
+            root = jsValue.toSlice(globalThis, allocator).slice();
         }
-        if (dir.isEmpty()) {
-            if (path_object.getTruthy(globalThis, "root")) |prop| {
-                prop.toZigString(&dir, globalThis);
-            }
+        var dir: []const u8 = "";
+        if (pathObject_ptr.getTruthy(globalThis, "dir")) |jsValue| {
+            dir = jsValue.toSlice(globalThis, allocator).slice();
         }
 
-        if (path_object.getTruthy(globalThis, "base")) |prop| {
-            prop.toZigString(&name_with_ext, globalThis);
+        lenSum += dir.len;
+
+        var base: []const u8 = "";
+        if (pathObject_ptr.getTruthy(globalThis, "base")) |jsValue| {
+            base = jsValue.toSlice(globalThis, allocator).slice();
+            lenSum += base.len;
         }
-        if (name_with_ext.isEmpty()) {
-            var had_ext = false;
-            if (path_object.getTruthy(globalThis, "ext")) |prop| {
-                prop.toZigString(&ext, globalThis);
-                had_ext = !ext.isEmpty();
-            }
-
-            if (path_object.getTruthy(globalThis, "name")) |prop| {
-                if (had_ext) {
-                    prop.toZigString(&name_, globalThis);
-                } else {
-                    prop.toZigString(&name_with_ext, globalThis);
-                }
-            }
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        var _name: []const u8 = "";
+        if (pathObject_ptr.getTruthy(globalThis, "name")) |jsValue| {
+            _name = jsValue.toSlice(globalThis, allocator).slice();
+            if (base.len == 0) lenSum += _name.len;
         }
-
-        if (dir.isEmpty()) {
-            if (!name_with_ext.isEmpty()) {
-                return name_with_ext.toValueAuto(globalThis);
-            }
-
-            if (name_.isEmpty()) {
-                return JSC.ZigString.Empty.toValue(globalThis);
-            }
-
-            const out = std.fmt.allocPrint(allocator, "{s}{s}", .{ name_, ext }) catch unreachable;
-            defer allocator.free(out);
-
-            return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
-        } else {
-            if (!isWindows) {
-                if (dir.eqlComptime("/")) {
-                    insert_separator = false;
-                }
-            } else {
-                if (dir.eqlComptime("\\")) {
-                    insert_separator = false;
-                }
-            }
+        var ext: []const u8 = "";
+        if (pathObject_ptr.getTruthy(globalThis, "ext")) |jsValue| {
+            ext = jsValue.toSlice(globalThis, allocator).slice();
+            if (base.len == 0) lenSum += ext.len;
         }
 
-        if (insert_separator) {
-            const separator = if (!isWindows) "/" else "\\";
-            if (name_with_ext.isEmpty()) {
-                const out = std.fmt.allocPrint(allocator, "{}{s}{}{}", .{ dir, separator, name_, ext }) catch unreachable;
-                defer allocator.free(out);
-                return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
-            }
+        // Add one for the possible separator.
+        lenSum += 1;
 
-            {
-                const out = std.fmt.allocPrint(allocator, "{}{s}{}", .{
-                    dir,
-                    separator,
-                    name_with_ext,
-                }) catch unreachable;
-                defer allocator.free(out);
-                return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
-            }
-        }
+        const buf = getBufAlloc(allocator, lenSum) catch {
+            // Supress exeption in zig. It does throw in JS land.
+            globalThis.throwOutOfMemory();
+            return JSC.JSValue.jsUndefined();
+        };
+        defer allocator.free(buf);
 
-        if (name_with_ext.isEmpty()) {
-            const out = std.fmt.allocPrint(allocator, "{}{}{}", .{ dir, name_, ext }) catch unreachable;
-            defer allocator.free(out);
-            return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
-        }
-
-        {
-            const out = std.fmt.allocPrint(allocator, "{}{}", .{
-                dir,
-                name_with_ext,
-            }) catch unreachable;
-            defer allocator.free(out);
-            return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
-        }
+        const pathObject = .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
+        const out = if (!isWindows) 
+            @This().formatPosix(pathObject, buf) 
+        else 
+            @This().formatWindow(pathObject, buf);
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
     }
 
-    fn isAbsoluteString(path: JSC.ZigString, windows: bool) bool {
-        if (!windows) return path.hasPrefixChar('/');
-        return isZigStringAbsoluteWindows(path);
+    /// Based on Node v21.6.1 path.posix.isAbsolute:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1159
+    pub inline fn isAbsolutePosixT(comptime T: type, path: []const T) bool {
+        // validateString of `path` is performed in fn pub isAbsolute.
+        return path.len > 0 and path[0] == CHAR_FORWARD_SLASH;
+    }
+
+    /// Based on Node v21.6.1 path.win32.isAbsolute:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L406
+    pub fn isAbsoluteWindowsT(comptime T: type, path: []const T) bool {
+        // validateString of `path` is performed in fn pub isAbsolute.
+        const len = path.len;
+        if (len == 0)
+          return false;
+
+        const byte0 = path[0];
+        return @This().isSepWindowsT(T, byte0) or
+          // Possible device root
+          (len > 2 and
+          @This().isWindowsDeviceRootT(T, byte0) and
+          path[1] == CHAR_COLON and
+          @This().isSepWindowsT(T, path[2]));
+    }
+
+    pub inline fn isAbsolutePosix(path: []const u8) bool {
+        return @This().isAbsolutePosixT(u8, path);
+    }
+
+    pub fn isAbsoluteWindowsZigString(zig_str: JSC.ZigString) bool {
+        return if (zig_str.len > 0 and zig_str.is16Bit())
+            @This().isAbsoluteWindowsT(u16, @alignCast(zig_str.utf16Slice()))
+        else @This().isAbsoluteWindowsT(u8, zig_str.slice());
     }
 
     pub fn isAbsolute(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        const arg = if (args_len > 0) args_ptr[0] else JSC.JSValue.undefined;
-        if (!arg.isString()) {
-            globalThis.throwInvalidArgumentType("isAbsolute", "path", "string");
-            return JSC.JSValue.undefined;
+        const path_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, path_ptr, "path", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
+
+        var pathZigStr = path_ptr.getZigString(globalThis);
+        if (!isWindows) {
+            var stack_fallback = std.heap.stackFallback(
+                stack_fallback_size_small, 
+                JSC.getAllocator(globalThis)
+            );    
+            const allocator = stack_fallback.get();
+            var path = pathZigStr.toSlice(allocator);
+            defer path.deinit();
+            return JSC.JSValue.jsBoolean(@This().isAbsolutePosix(path.slice()));
         }
-        const zig_str = arg.getZigString(globalThis);
-        return JSC.JSValue.jsBoolean(zig_str.len > 0 and isAbsoluteString(zig_str, isWindows));
+        return JSC.JSValue.jsBoolean(@This().isAbsoluteWindowsZigString(pathZigStr));
     }
 
-    fn isZigStringAbsoluteWindows(zig_str: JSC.ZigString) bool {
-        std.debug.assert(zig_str.len > 0); // caller must check
-        if (zig_str.is16Bit()) {
-            var buf = [4]u16{ 0, 0, 0, 0 };
-            const u16_slice = zig_str.utf16Slice();
+    pub inline fn isSepPosixT(comptime T: type, byte: T) bool {
+        return byte == CHAR_FORWARD_SLASH;
+    }
 
-            buf[0] = u16_slice[0];
-            if (u16_slice.len > 1)
-                buf[1] = u16_slice[1];
+    pub inline fn isSepWindowsT(comptime T: type, byte: T) bool {
+        return byte == CHAR_FORWARD_SLASH or byte == CHAR_BACKWARD_SLASH;
+    }
 
-            if (u16_slice.len > 2)
-                buf[2] = u16_slice[2];
-
-            if (u16_slice.len > 3)
-                buf[3] = u16_slice[3];
-
-            return std.fs.path.isAbsoluteWindowsWTF16(buf[0..@min(u16_slice.len, buf.len)]);
+    /// Based on Node v21.6.1 private helper isWindowsDeviceRoot:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L60C10-L60C29
+    inline fn isWindowsDeviceRootT(comptime T: type, byte: T) bool {
+        return (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
+    }
+    
+    /// Based on Node v21.6.1 path.posix.join:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1169
+    pub inline fn joinPosixT(comptime T: type, paths: []const []const T, buf: []T) []const T {
+        if (paths.len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
         }
 
-        return std.fs.path.isAbsoluteWindows(zig_str.slice());
+        var bufSize: usize = 0;
+        var bufOffset: usize = 0;
+
+        // Back joined by expandable varLenTmpBuf1 in case it is long.
+        var joined: []const T = comptime L(T, "");
+
+        for (paths) |path| {
+            // validateString of `path is performed in fn pub join.
+            // Back our virtual "joined" string by expandable varLenTmpBuf1 in
+            // case it is long.
+            const len = path.len;
+            if (len > 0) {
+                // Translated from the following JS code:
+                //   if (joined === undefined)
+                //     joined = arg;
+                //   else
+                //     joined += `/${arg}`;
+                if (bufSize != 0) {
+                    bufOffset = bufSize;
+                    bufSize += 1;
+                    varLenTmpBuf1[bufOffset] = CHAR_FORWARD_SLASH;
+                }
+                bufOffset = bufSize;
+                bufSize += len;
+                @memcpy(varLenTmpBuf1[bufOffset ..bufSize], path);
+
+                joined = varLenTmpBuf1[0 ..bufSize];
+            }
+        }
+        if (bufSize == 0) {
+            return comptime L(T, CHAR_STR_DOT);
+        }
+        return @This().normalizePosixT(T, joined, buf);
     }
-    pub fn join(
-        globalThis: *JSC.JSGlobalObject,
-        isWindows: bool,
-        args_ptr: [*]JSC.JSValue,
-        args_len: u16,
-    ) callconv(.C) JSC.JSValue {
+
+    /// Based on Node v21.6.1 path.win32.join:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L425
+    pub fn joinWindowsT(comptime T: type, paths: []const []const T, buf: []T) []const T {
+        if (paths.len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
+        }
+
+        const isSepT = @This().isSepWindowsT;
+
+        var bufSize: usize = 0;
+        var bufOffset: usize = 0;
+
+        // Back joined by expandable varLenTmpBuf1 in case it is long.
+        var joined: []const T = comptime L(T, "");
+        var firstPart: []const T = comptime L(T, "");
+
+        for (paths) |path| {
+            // validateString of `path` is performed in fn pub join.
+            const len = path.len;
+            if (len > 0) {
+                // Translated from the following JS code:
+                //   if (joined === undefined)
+                //     joined = firstPart = arg;
+                //   else
+                //     joined += `\\${arg}`;
+                bufOffset = bufSize;
+                if (bufSize == 0) {
+                    bufSize = len;
+                    @memcpy(varLenTmpBuf1[0 ..bufSize], path);
+
+                    joined = varLenTmpBuf1[0 ..bufSize];
+                    firstPart = joined;
+                } else {
+                    bufOffset = bufSize;
+                    bufSize += 1;
+                    varLenTmpBuf1[bufOffset] = CHAR_BACKWARD_SLASH;
+                    bufOffset = bufSize;
+                    bufSize += len;
+                    @memcpy(varLenTmpBuf1[bufOffset ..bufSize], path);
+
+                    joined = varLenTmpBuf1[0 ..bufSize];
+                }
+            }
+        }
+        if (bufSize == 0) {
+            return comptime L(T, CHAR_STR_DOT);
+        }
+
+        // Make sure that the joined path doesn't start with two slashes, because
+        // normalize() will mistake it for a UNC path then.
+        //
+        // This step is skipped when it is very clear that the user actually
+        // intended to point at a UNC path. This is assumed when the first
+        // non-empty string arguments starts with exactly two slashes followed by
+        // at least one more non-slash character.
+        //
+        // Note that for normalize() to treat a path as a UNC path it needs to
+        // have at least 2 components, so we don't filter for that here.
+        // This means that the user can use join to construct UNC paths from
+        // a server name and a share name; for example:
+        //   path.join('//server', 'share') -> '\\\\server\\share\\')
+        var needsReplace: bool = true;
+        var slashCount: usize = 0;
+        if (isSepT(T, firstPart[0])) {
+            slashCount += 1;
+            const firstLen = firstPart.len;
+            if (firstLen > 1 and 
+                    isSepT(T, firstPart[1])) {
+                slashCount += 1;
+                if (firstLen > 2) {
+                    if (isSepT(T, firstPart[2])) {
+                        slashCount += 1;
+                    } else {
+                        // We matched a UNC path in the first part
+                        needsReplace = false;
+                    }
+                }
+            }
+        }
+        if (needsReplace) {
+            // Find any more consecutive slashes we need to replace
+            while (slashCount < bufSize and 
+                    isSepT(T, joined[slashCount])) {
+                slashCount += 1;
+            }
+            // Replace the slashes if needed
+            if (slashCount >= 2) {
+                // Translated from the following JS code:
+                //   joined = `\\${StringPrototypeSlice(joined, slashCount)}`;
+                const sliceLen = bufSize - slashCount;
+                const sliceOffset = slashCount - 1;
+                // Move all bytes to the right by sliceOffset
+                var i: usize = slashCount;
+                while (i < bufSize) : (i += 1) {
+                    varLenTmpBuf1[i - sliceOffset] = joined[i];
+                }
+                // Prepend the separator.
+                varLenTmpBuf1[0] = CHAR_BACKWARD_SLASH;
+                bufSize = sliceLen + 1;
+
+                joined = varLenTmpBuf1[0 ..bufSize];
+            }
+        }
+        return @This().normalizeWindowsT(T, joined, buf);
+    }
+
+    pub inline fn joinPosix(paths: []const []const u8, buf: []u8) []const u8 {
+        return @This().joinPosixT(u8, paths, buf);
+    }
+
+    pub inline fn joinWindows(paths: []const []const u8, buf: []u8) []const u8 {
+        return @This().joinWindowsT(u8, paths, buf);
+    }
+
+    pub fn join(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0) return JSC.ZigString.init(".").toValue(globalThis);
-        var arena = @import("root").bun.ArenaAllocator.init(heap_allocator);
+        if (args_len == 0) return JSC.ZigString.initUTF8(CHAR_STR_DOT).toValueGC(globalThis);
+
+        var arena = bun.ArenaAllocator.init(heap_allocator);
         defer arena.deinit();
-
         const arena_allocator = arena.allocator();
-        var stack_fallback_allocator = std.heap.stackFallback(
-            ((32 * @sizeOf(string)) + 1024),
-            arena_allocator,
-        );
-        var allocator = stack_fallback_allocator.get();
 
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-        var count: usize = 0;
-        var i: u16 = 0;
-        var to_join = allocator.alloc(string, args_len) catch unreachable;
-        for (args_ptr[0..args_len]) |arg| {
-            const zig_str: JSC.ZigString = arg.getZigString(globalThis);
-            // Windows path joining code expects the first path to exist
-            // to be used for UNC path detection.
-            if (zig_str.len > 0) {
-                to_join[i] = zig_str.toSlice(allocator).slice();
-                count += to_join[i].len;
-                i += 1;
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_large, 
+            JSC.getAllocator(globalThis)
+        );
+        var allocator = stack_fallback.get();
+
+        var paths = allocator.alloc(string, args_len) catch bun.outOfMemory();
+        defer allocator.free(paths);
+
+        // Adding 2 bytes when Windows for the possible UNC root, i.e. "\\\\", addition.
+        var lenSum: usize = if (isWindows) 2 else 0;
+        for (0 ..args_len) |i| {
+            const path_ptr = args_ptr[i];
+            // Supress exeption in zig. It does throw in JS land.
+            validateString(globalThis, path_ptr, "paths[{d}]", .{i}) catch {
+                return JSC.JSValue.jsUndefined();
+            };
+            const path = path_ptr.toSlice(globalThis, arena_allocator).slice();
+            const len = path.len;
+            paths[i] = path;
+            // Add 1 for the separator.
+            lenSum += if (len > 0 and lenSum > 0) len + 1 else len;
+        }
+
+        const buf = getBufAlloc(allocator, lenSum) catch {
+            // Supress exeption in zig. It does throw in JS land.
+            globalThis.throwOutOfMemory();
+            return JSC.JSValue.jsUndefined();
+        };
+        defer allocator.free(buf);
+
+        const out = if (!isWindows) 
+            @This().joinPosix(paths, buf) 
+        else 
+            @This().joinWindows(paths, buf);
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+    }
+
+    /// Based on Node v21.6.1 private helper normalizeString:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L65C1-L66C77
+    ///
+    /// Resolves . and .. elements in a path with directory names
+    fn normalizeStringT(
+        comptime T: type, 
+        path: []const T, 
+        allowAboveRoot: bool, 
+        separator: T, 
+        comptime platform: path_handler.Platform, 
+        buf: []T
+    ) []const T {
+        const len = path.len;
+        const isSepT = 
+            if (platform == .posix)
+                @This().isSepPosixT 
+            else 
+                @This().isSepWindowsT;
+
+        var bufOffset: usize = 0;
+        var bufSize: usize = 0;
+
+        var res: []const T = comptime L(T, "");
+        var lastSegmentLength: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var lastSlash: ?usize = null;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var dots: ?usize = 0;
+        var byte: T = 0;
+
+        var i: usize = 0;
+        while (i <= len) : (i += 1) {
+            if (i < len) {
+                byte = path[i];
+            } else if (isSepT(T, byte)) {
+                break;
+            } else {
+                byte = CHAR_FORWARD_SLASH;
+            }
+
+            if (isSepT(T, byte)) {
+                // Translated from the following JS code:
+                //   if (lastSlash === i - 1 || dots === 1) {
+                if (
+                    (lastSlash == null and i == 0) or 
+                    (lastSlash != null and i > 0 and lastSlash.? == i - 1) or 
+                    (dots != null and dots.? == 1)) {
+                    // NOOP
+                } else if (dots != null and dots.? == 2) {
+                    if (
+                        bufSize < 2 or
+                        lastSegmentLength != 2 or
+                        buf[bufSize - 1] != CHAR_DOT or
+                        buf[bufSize - 2] != CHAR_DOT
+                    ) {
+                        if (bufSize > 2) {
+                            const lastSlashIndex = std.mem.lastIndexOfScalar(T, buf[0 ..bufSize], separator);
+                            if (lastSlashIndex == null) {
+                                res = comptime L(T, "");
+                                bufSize = 0;
+                                lastSegmentLength = 0;
+                            } else {
+                                bufSize = lastSlashIndex.?;
+                                res = buf[0 ..bufSize];
+                                // Translated from the following JS code:
+                                //   lastSegmentLength =
+                                //     res.length - 1 - StringPrototypeLastIndexOf(res, separator);
+                                const lastIndexOfSep = std.mem.lastIndexOfScalar(T, buf[0 ..bufSize], separator);
+                                if (lastIndexOfSep == null) {
+                                    // Yes (>ლ), Node relies on the -1 result of 
+                                    // StringPrototypeLastIndexOf(res, separator).
+                                    // A - -1 is a positive 1.
+                                    // So the code becomes
+                                    //   lastSegmentLength = res.length - 1 + 1;
+                                    // or
+                                    //   lastSegmentLength = res.length;
+                                    lastSegmentLength = bufSize;
+                                } else {
+                                    lastSegmentLength = bufSize - 1 - lastIndexOfSep.?;
+                                }
+                            }
+                            lastSlash = i;
+                            dots = 0;
+                            continue;
+                        } else if (bufSize != 0) {
+                            res = comptime L(T, "");
+                            bufSize = 0;
+                            lastSegmentLength = 0;
+                            lastSlash = i;
+                            dots = 0;
+                            continue;
+                        }
+                    }
+                    if (allowAboveRoot) {
+                        // Translated from the following JS code:
+                        //   res += res.length > 0 ? `${separator}..` : '..';
+                        if (bufSize > 0) {
+                            bufOffset = bufSize;
+                            bufSize += 1;
+                            buf[bufOffset] = separator;
+                            bufOffset = bufSize;
+                            bufSize += 2;
+                            buf[bufOffset] = CHAR_DOT;
+                            buf[bufOffset + 1] = CHAR_DOT;
+                        } else {
+                            bufSize = 2;
+                            buf[0] = CHAR_DOT;
+                            buf[1] = CHAR_DOT;
+                        }
+
+                        res = buf[0 ..bufSize];
+                        lastSegmentLength = 2;
+                    }
+                } else {
+                    // Translated from the following JS code:
+                    //   if (res.length > 0)
+                    //     res += `${separator}${StringPrototypeSlice(path, lastSlash + 1, i)}`;
+                    //   else
+                    //     res = StringPrototypeSlice(path, lastSlash + 1, i);
+                    if (bufSize > 0) {
+                        bufOffset = bufSize;
+                        bufSize += 1;
+                        buf[bufOffset] = separator;
+                    }
+                    const sliceStart = if (lastSlash != null) lastSlash.? + 1 else 0;
+                    const slice = path[sliceStart ..i];
+
+                    bufOffset = bufSize;
+                    bufSize += slice.len;
+                    @memcpy(buf[bufOffset ..bufSize], slice);
+                    
+                    res = buf[0 ..bufSize];
+
+                    // Translated from the following JS code:
+                    //   lastSegmentLength = i - lastSlash - 1;
+                    const subtract = if (lastSlash != null) lastSlash.? + 1 else 2;
+                    lastSegmentLength = if (i >= subtract) i - subtract else 0;
+                }
+                lastSlash = i;
+                dots = 0;
+                continue;
+            } else if (byte == CHAR_DOT and dots != null) {
+                dots = if (dots != null) dots.? + 1 else 0;
+                continue;
+            } else {
+                dots = null;
             }
         }
 
-        if (count == 0) return JSC.ZigString.init(".").toValue(globalThis);
+        return res;
+    }
 
-        var buf_to_use: []u8 = &buf;
-        if (count * 2 >= buf.len) {
-            buf_to_use = allocator.alloc(u8, count * 2) catch {
-                globalThis.throwOutOfMemory();
-                return .zero;
-            };
+    // Based on Node v21.6.1 path.posix.normalize
+    // https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1130
+    pub fn normalizePosixT(comptime T: type, path: []const T, buf: []T) []const T {
+        // validateString of `path` is performed in fn pub normalize.
+
+        const len = path.len;
+        if (len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
         }
 
-        const out = if (!isWindows)
-            PathHandler.joinStringBuf(buf_to_use, to_join[0..i], .posix)
-        else
-            PathHandler.joinStringBuf(buf_to_use, to_join[0..i], .windows);
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        const _isAbsolute = path[0] == CHAR_FORWARD_SLASH;
+        const trailingSeparator = path[len - 1] == CHAR_FORWARD_SLASH;
 
-        var str = bun.String.createUTF8(out);
-        defer str.deref();
-        return str.toJS(globalThis);
+        // Normalize the path
+        var normalizedPath = @This().normalizeStringT(T, path, !_isAbsolute, CHAR_FORWARD_SLASH, .posix, buf);
+        
+        var bufSize: usize = normalizedPath.len;
+        if (bufSize == 0) {
+            if (_isAbsolute) {
+                return comptime L(T, CHAR_STR_FORWARD_SLASH);
+            }
+            return if (trailingSeparator) 
+                comptime L(T, "./") 
+            else comptime L(T, CHAR_STR_DOT);
+        }
+
+        var bufOffset: usize = 0;
+
+        // Translated from the following JS code:
+        //   if (trailingSeparator)
+        //     path += '/';
+        if (trailingSeparator) {
+            bufOffset = bufSize;
+            bufSize += 1;
+            buf[bufOffset] = CHAR_FORWARD_SLASH;
+            normalizedPath = buf[0 ..bufSize];
+        }
+
+        // Translated from the following JS code:
+        //   return isAbsolute ? `/${path}` : path;
+        if (_isAbsolute) {
+            // Move all bytes to the right by 1
+            var i: usize = bufSize - 1;
+            while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                buf[i + 1] = normalizedPath[i];
+            }
+            // Prepend the separator.
+            bufSize += 1;
+            buf[0] = CHAR_FORWARD_SLASH;
+            normalizedPath = buf[0 ..bufSize];
+        }
+        return normalizedPath[0.. bufSize];
+    }
+
+    // Based on Node v21.6.1 path.win32.normalize
+    // https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L308
+    pub fn normalizeWindowsT(comptime T: type, path: []const T, buf: []T) []const T {
+        // validateString of `path` is performed in fn pub normalize.
+        const len = path.len;
+        if (len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
+        }
+
+        const isSepT = @This().isSepWindowsT;
+
+        // Moved `rootEnd`, `device`, and `_isAbsolute` initialization after
+        // the `if (len == 1)` check.
+        const byte0: T = path[0];
+
+        // Try to match a root
+        if (len == 1) {
+            // `path` contains just a single char, exit early to avoid
+            // unnecessary work
+            return if (isSepT(T, byte0)) comptime L(T, CHAR_STR_BACKWARD_SLASH) else path;
+        }
+
+        var rootEnd: usize = 0;
+        // Backed by fixedLenTmpBuf3
+        var device: ?[]const T = null;
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        var _isAbsolute: bool = false;
+
+        var bufOffset: usize = 0;
+        var bufSize: usize = 0;
+
+        if (isSepT(T, byte0)) {
+            // Possible UNC root
+
+            // If we started with a separator, we know we at least have an absolute
+            // path of some kind (UNC or otherwise)
+            _isAbsolute = true;
+
+            if (isSepT(T, path[1])) {
+                // Matched double path separator at beginning
+                var j: usize = 2;
+                var last: usize = j;
+                // Match 1 or more non-path separators
+                while (j < len and 
+                        !isSepT(T, path[j])) {
+                    j += 1;
+                }
+                if (j < len and j != last) {
+                    const firstPart: []const u8 = path[last ..j];
+                    // Matched!
+                    last = j;
+                    // Match 1 or more path separators
+                    while (j < len and 
+                            isSepT(T, path[j])) {
+                        j += 1;
+                    }
+                    if (j < len and j != last) {
+                        // Matched!
+                        last = j;
+                        // Match 1 or more non-path separators
+                        while (j < len and 
+                                !isSepT(T, path[j])) {
+                            j += 1;
+                        }
+                        if (j == len) {
+                            // We matched a UNC root only
+                            // Return the normalized version of the UNC root since there
+                            // is nothing left to process
+                            
+                            // Translated from the following JS code:
+                            //   return `\\\\${firstPart}\\${StringPrototypeSlice(path, last)}\\`;
+                            bufSize = 2;
+                            buf[0] = CHAR_BACKWARD_SLASH;
+                            buf[1] = CHAR_BACKWARD_SLASH;
+                            bufOffset = bufSize;
+                            bufSize += firstPart.len;
+                            @memcpy(buf[bufOffset ..bufSize], firstPart);
+                            bufOffset = bufSize;
+                            bufSize += 1;
+                            buf[bufOffset] = CHAR_BACKWARD_SLASH;
+                            bufOffset = bufSize;
+                            bufSize += len - last;
+                            @memcpy(buf[bufOffset ..bufSize], path[last ..len]);
+                            bufOffset = bufSize;
+                            bufSize += 1;
+                            buf[bufOffset] = CHAR_BACKWARD_SLASH;
+                            return buf[0 ..bufSize];
+                        }
+                        if (j != last) {
+                            // We matched a UNC root with leftovers
+                            
+                            // Translated from the following JS code:
+                            //   device =
+                            //     `\\\\${firstPart}\\${StringPrototypeSlice(path, last, j)}`;
+                            //   rootEnd = j;
+                            bufSize = 2;
+                            fixedLenTmpBuf3[0] = CHAR_BACKWARD_SLASH;
+                            fixedLenTmpBuf3[1] = CHAR_BACKWARD_SLASH;
+                            bufOffset = bufSize;
+                            bufSize += firstPart.len;
+                            @memcpy(fixedLenTmpBuf3[bufOffset ..bufSize], firstPart);
+                            bufOffset = bufSize;
+                            bufSize += 1;
+                            fixedLenTmpBuf3[bufOffset] = CHAR_BACKWARD_SLASH;
+                            bufOffset = bufSize;
+                            bufSize += j - last;
+                            @memcpy(fixedLenTmpBuf3[bufOffset ..bufSize], path[last ..j]);
+
+                            device = fixedLenTmpBuf3[0 ..bufSize];
+                            rootEnd = j;
+                        }
+                    }
+                }
+            } else {
+                rootEnd = 1;
+            }
+        } else if (@This().isWindowsDeviceRootT(T, byte0) and 
+                    path[1] == CHAR_COLON) {
+            // Possible device root
+            bufSize = 2;
+            fixedLenTmpBuf3[0] = byte0;
+            fixedLenTmpBuf3[1] = CHAR_COLON;
+
+            device = fixedLenTmpBuf3[0 ..bufSize];
+            rootEnd = bufSize;
+            if (len > 2 and isSepT(T, path[2])) {
+                // Treat separator following drive name as an absolute path
+                // indicator
+                _isAbsolute = true;
+                rootEnd = 3;
+            }
+        }
+
+        var tail =
+            if (rootEnd < len) 
+                @This().normalizeStringT(T, path[rootEnd ..len], 
+                    !_isAbsolute, CHAR_BACKWARD_SLASH, .windows, buf)
+            else comptime L(T, "");
+        if (tail.len == 0 and !_isAbsolute) {
+            tail = comptime L(T, CHAR_STR_DOT);
+            buf[0] = CHAR_DOT;
+        }
+
+        var tailLen = tail.len;
+        bufSize = tailLen;
+
+        if (tailLen > 0 and 
+                isSepT(T, path[len - 1])) {
+            // Translated from the following JS code:
+            //   tail += '\\';
+            bufOffset = bufSize;
+            bufSize += 1;
+            buf[bufOffset] = CHAR_BACKWARD_SLASH;
+            tail = buf[0 ..bufSize];
+            tailLen = bufSize;
+        }
+        if (device == null) {
+            // Translated from the following JS code:
+            //   return isAbsolute ? `\\${tail}` : tail;
+            if (_isAbsolute) {
+                if (tailLen > 0) {
+                    // Move all bytes to the right by 1
+                    var i: usize = tailLen - 1;
+                    while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                        buf[i + 1] = tail[i];
+                    }
+                }
+                bufSize += 1;
+                // Prepend the separator.
+                buf[0] = CHAR_BACKWARD_SLASH;
+            }
+            return buf[0 ..bufSize];
+        }
+
+        // Translated from the following JS code:
+        //   return isAbsolute ? `${device}\\${tail}` : `${device}${tail}`;
+        {
+            const deviceLen = device.?.len;
+            const moveBy = if (_isAbsolute) deviceLen + 1 else deviceLen;
+            // Move all bytes to the right by `moveBy`
+            if (tailLen > 0) {
+                var i: usize = tailLen - 1;
+                while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                    buf[i + moveBy] = tail[i];
+                }
+            }
+            bufSize += moveBy; 
+            @memcpy(buf[0 ..deviceLen], device.?);
+            if (_isAbsolute) {
+                buf[deviceLen] = CHAR_BACKWARD_SLASH;
+            }
+        }
+        return buf[0 ..bufSize];
+    }
+
+    pub inline fn normalizePosix(path: []const u8, buf: []u8) []const u8 {
+        return @This().normalizePosixT(u8, path, buf);
+    }
+
+    pub inline fn normalizeWindows(path: []const u8, buf: []u8) []const u8 {
+        return @This().normalizeWindowsT(u8, path, buf);
     }
 
     pub fn normalize(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0) return JSC.ZigString.init("").toValue(globalThis);
+        const path_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, path_ptr, "path", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
 
-        var zig_str: JSC.ZigString = args_ptr[0].getZigString(globalThis);
-        if (zig_str.len == 0) return JSC.ZigString.init(".").toValue(globalThis);
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
 
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-        var str_slice = zig_str.toSlice(heap_allocator);
-        defer str_slice.deinit();
-        const str = str_slice.slice();
+        var path = path_ptr.toSlice(globalThis, allocator);
+        defer path.deinit();
+
+        const buf = getBufAlloc(allocator, path.len) catch {
+            // Supress exeption in zig. It does throw in JS land.
+            globalThis.throwOutOfMemory();
+            return JSC.JSValue.jsUndefined();
+        };
+        defer allocator.free(buf);
 
         const out = if (!isWindows)
-            PathHandler.normalizeStringNode(str, &buf, .posix)
+            @This().normalizePosix(path.slice(), buf)
         else
-            PathHandler.normalizeStringNode(str, &buf, .windows);
-
-        var out_str = JSC.ZigString.init(out);
-        if (str_slice.isAllocated()) out_str.setOutputEncoding();
-        return out_str.toValueGC(globalThis);
+            @This().normalizeWindows(path.slice(), buf);
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
     }
 
-    pub fn parse(globalThis: *JSC.JSGlobalObject, win32: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
-        return switch (win32) {
-            inline else => |use_win32| parseWithComptimePlatform(globalThis, use_win32, args_ptr, args_len),
-        };
-    }
+    // Based on Node v21.6.1 path.posix.parse
+    // https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1452
+    pub fn parsePosixT(comptime T: type, path: []const T) ParsedPath(T) {
+        // validateString of `path` is performed in fn pub parse.
+        var root: []const T = comptime L(T, "");
+        var dir: []const T = comptime L(T, "");
+        var base: []const T = comptime L(T, "");
+        var ext: []const T = comptime L(T, "");
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        var _name: []const T = comptime L(T, "");
 
-    pub fn parseWithComptimePlatform(globalThis: *JSC.JSGlobalObject, comptime win32: bool, args_ptr: [*]JSC.JSValue, args_len: u16) JSC.JSValue {
-        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        if (args_len == 0 or !args_ptr[0].jsType().isStringLike()) {
-            return JSC.toInvalidArguments("path string is required", .{}, globalThis);
+        const len = path.len;
+        if (len == 0) {
+            return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
         }
-        var path_slice: JSC.ZigString.Slice = args_ptr[0].toSlice(globalThis, heap_allocator);
-        defer path_slice.deinit();
-        var path = path_slice.slice();
 
-        const is_absolute = switch (win32) {
-            true => std.fs.path.isAbsoluteWindows(path),
-            false => std.fs.path.isAbsolutePosix(path),
-        };
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        const _isAbsolute = path[0] == CHAR_FORWARD_SLASH;
+        var start: usize = 0;
+        if (_isAbsolute) {
+            root = "/";
+            start = 1;
+        }
 
-        // if its not absolute root must be empty
-        var root = JSC.ZigString.Empty;
-        if (is_absolute) {
-            std.debug.assert(path.len > 0);
-            root = JSC.ZigString.init(
-                if (win32) root: {
-                    // On Win32, the root is a substring of the input, containing just the root dir. Aka:
-                    // - Unix Absolute path
-                    //     "\" or "/"
-                    // - Drive letter
-                    //     "C:\" or "C:" if no slash
-                    // - UNC paths must start with \\ and then include another \ somewhere
-                    // they can also use forward slashes anywhere
-                    //     "\\server\share"
-                    //     "//server/share"
-                    //     "/\server\share" lol
-                    //     "\\?\" lol
-                    if (path.len > 0 and strings.charIsAnySlash(path[0])) {
-                        // minimum length for a unc path is 5
-                        if (path.len >= 5 and
-                            strings.charIsAnySlash(path[1]) and
-                            !strings.charIsAnySlash(path[2]))
-                        {
-                            if (strings.indexOfAny(path[3..], "/\\")) |first_slash| {
-                                if (strings.indexOfAny(path[3 + first_slash + 1 ..], "/\\")) |second_slash| {
-                                    const len = 3 + 1 + first_slash + second_slash;
-                                    // case given for input "//hello/world/"
-                                    // this is not considered a unc path
-                                    if (path.len > len) {
-                                        break :root path[0 .. len + 1];
-                                    }
-                                }
-                            }
-                        }
-                        // return the un-normalized slash
-                        break :root path[0..1];
-                    }
-                    if (path.len > 2 and path[1] == ':') {
-                        // would not be an absolute path if it was just "C:"
-                        std.debug.assert(strings.charIsAnySlash(path[2]));
-                        break :root path[0..3];
-                    }
-                    break :root path[0..1];
-                } else
-                // Unix does not make it possible to have a root that isnt `/`
-                std.fs.path.sep_str_posix,
-            );
-        } else if (win32) {
-            if (path.len > 1 and path[1] == ':') {
-                // for input "C:hello" which is not considered absolute
-                comptime std.debug.assert(!std.fs.path.isAbsoluteWindows("C:hello"));
-                comptime std.debug.assert(std.fs.path.isAbsoluteWindows("/:/"));
-                root = JSC.ZigString.init(path[0..2]);
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var startDot: ?usize = null;
+        var startPart: usize = 0;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash = true;
+        var i: usize = len - 1;
+
+        // Track the state of characters (if any) we see before our first dot and
+        // after any path separator we find
+        
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var preDotState: ?usize = 0;
+
+        // Get non-dir info
+        while (i >= start) : (i -= if (i > 0) 1 else break) {
+            const byte = path[i];
+            if (byte == CHAR_FORWARD_SLASH) {
+                // If we reached a path separator that was not part of a set of path
+                // separators at the end of the string, stop now
+                if (!matchedSlash) {
+                    startPart = i + 1;
+                    break;
+                }
+                continue;
+            }
+            if (end == null) {
+                // We saw the first non-path separator, mark this as the end of our
+                // extension
+                matchedSlash = false;
+                end = i + 1;
+            }
+
+            if (byte == CHAR_DOT) {
+                // If this is our first dot, mark it as the start of our extension
+                if (startDot == null) {
+                    startDot = i;
+                } else if (preDotState != null and preDotState.? != 1) {
+                    preDotState = 1;
+                }
+            } else if (startDot != null) {
+                // We saw a non-dot and non-path separator before our dot, so we should
+                // have a good chance at having a non-empty extension
+                preDotState = null;
+            }
+        }
+        
+
+        if (end != null) {
+            // Prefix with _ to avoid shadowing the identifier in the outer scope.
+            const _start = if (startPart == 0 and _isAbsolute) 1 else startPart;
+            if (startDot == null or
+                    // We saw a non-dot character immediately before the dot
+                    (preDotState != null and preDotState.? == 0) or
+                    // The (right-most) trimmed path component is exactly '..'
+                    (preDotState != null and preDotState.? == 1 and
+                    startDot.? == end.? - 1 and
+                    startDot.? == startPart + 1)
+            ) {
+                _name = path[_start ..end.?];
+                base = _name;
+            } else {
+                _name = path[_start ..startDot.?];
+                base = path[_start ..end.?];
+                ext = path[startDot.? ..end.?];
             }
         }
 
-        const path_name = Fs.NodeJSPathName.init(
-            if (win32) path[root.len..] else path,
-            win32,
-        );
-        var dir = JSC.ZigString.init(path_name.dir);
+        if (startPart > 0) {
+            dir = path[0 ..(startPart - 1)];
+        } else if (_isAbsolute) {
+            dir = "/";
+        }
 
-        // if is absolute and dir is empty, then dir = root
-        if (is_absolute and path_name.dir.len == 0) {
+        return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
+    }
+
+    // Based on Node v21.6.1 path.win32.parse
+    // https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L916
+    pub fn parseWindowsT(comptime T: type, path: []const T) ParsedPath(T)  {
+        // validateString of `path` is performed in fn pub parse.
+        var root: []const T = comptime L(T, "");
+        var dir: []const T = comptime L(T, "");
+        var base: []const T = comptime L(T, "");
+        var ext: []const T = comptime L(T, "");
+        // Prefix with _ to avoid shadowing the identifier in the outer scope.
+        var _name: []const T = comptime L(T, "");
+
+        const len = path.len;
+        if (len == 0) {
+            return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
+        }
+        
+        const isSepT = @This().isSepWindowsT;
+        
+        var rootEnd: usize = 0;
+        var byte = path[0];
+
+        if (len == 1) {
+            if (isSepT(T, byte)) {
+                // `path` contains just a path separator, exit early to avoid 
+                // unnecessary work
+                root = path;
+                dir = path;
+            } else {
+                base = path;
+                _name = path;
+            }
+            return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
+        }
+
+        // Try to match a root
+        if (isSepT(T, byte)) {
+            // Possible UNC root
+
+            rootEnd = 1;
+            if (isSepT(T, path[1])) {
+                // Matched double path separator at the beginning
+                var j: usize = 2;
+                var last: usize = j;
+                // Match 1 or more non-path separators
+                while (j < len and
+                        !isSepT(T, path[j])) {
+                    j += 1;
+                }
+                if (j < len and j != last) {
+                    // Matched!
+                    last = j;
+                    // Match 1 or more path separators
+                    while (j < len and 
+                            isSepT(T, path[j])) {
+                        j += 1;
+                    }
+                    if (j < len and j != last) {
+                        // Matched!
+                        last = j;
+                        // Match 1 or more non-path separators
+                        while (j < len and 
+                                !isSepT(T, path[j])) {
+                            j += 1;
+                        }
+                        if (j == len) {
+                            // We matched a UNC root only
+                            rootEnd = j;
+                        } else if (j != last) {
+                            // We matched a UNC root with leftovers
+                            rootEnd = j + 1;
+                        }
+                    }
+                }
+            }
+        } else if (@This().isWindowsDeviceRootT(T, byte) and
+                   path[1] == CHAR_COLON) {
+            // Possible device root
+            if (len <= 2) {
+                // `path` contains just a drive root, exit early to avoid 
+                // unnecessary work
+                root = path;
+                dir = path;
+                return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
+            }
+            rootEnd = 2;
+            if (isSepT(T, path[2])) {
+                if (len == 3) {
+                    // `path` contains just a drive root, exit early to avoid 
+                    // unnecessary work
+                    root = path;
+                    dir = path;
+                    return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
+                }
+                rootEnd = 3;
+            }
+        }
+        if (rootEnd > 0) {
+            root = path[0 ..rootEnd];
+        }
+
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var startDot: ?usize = null;
+        var startPart = rootEnd;
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var end: ?usize = null;
+        var matchedSlash = true;
+        var i: usize = len - 1;
+
+        // Track the state of characters (if any) we see before our first dot and
+        // after any path separator we find
+        
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var preDotState: ?usize = 0;
+
+        // Get non-dir info
+        while (i >= rootEnd) : (i -= if (i > 0) 1 else break) {
+            byte = path[i];
+            if (isSepT(T, byte)) {
+                // If we reached a path separator that was not part of a set of path
+                // separators at the end of the string, stop now
+                if (!matchedSlash) {
+                    startPart = i + 1;
+                    break;
+                }
+                continue;
+            }
+            if (end == null) {
+                // We saw the first non-path separator, mark this as the end of our
+                // extension
+                matchedSlash = false;
+                end = i + 1;
+            }
+            if (byte == CHAR_DOT) {
+                // If this is our first dot, mark it as the start of our extension
+                if (startDot == null) {
+                    startDot = i;
+                } else if (preDotState != null and preDotState != 1) {
+                    preDotState = 1;
+                }
+            } else if (startDot != null) {
+                // We saw a non-dot and non-path separator before our dot, so we should
+                // have a good chance at having a non-empty extension
+                preDotState = null;
+            }
+        }
+
+        if (end != null) {
+            if (startDot == null or
+                    // We saw a non-dot character immediately before the dot
+                    (preDotState != null and preDotState.? == 0) or
+                    // The (right-most) trimmed path component is exactly '..'
+                    (preDotState != null and preDotState.? == 1 and
+                    startDot.? == end.? - 1 and
+                    startDot.? == startPart + 1)
+            ) {
+                // Prefix with _ to avoid shadowing the identifier in the outer scope.
+                _name = path[startPart ..end.?];
+                base = _name;
+            } else {
+                _name = path[startPart ..startDot.?];
+                base = path[startPart ..end.?];
+                ext = path[startDot.? ..end.?];
+            }
+        }
+
+        // If the directory is the root, use the entire root as the `dir` including
+        // the trailing slash if any (`C:\abc` -> `C:\`). Otherwise, strip out the
+        // trailing slash (`C:\abc\def` -> `C:\abc`).
+        if (startPart > 0 and startPart != rootEnd) {
+            dir = path[0 ..(startPart - 1)];
+        } else {
             dir = root;
         }
 
-        var base = JSC.ZigString.init(path_name.base);
-        var name_ = JSC.ZigString.init(path_name.filename);
-        var ext = JSC.ZigString.init(path_name.ext);
-        dir.setOutputEncoding();
-        root.setOutputEncoding();
-        base.setOutputEncoding();
-        name_.setOutputEncoding();
-        ext.setOutputEncoding();
-
-        var result = JSC.JSValue.createEmptyObject(globalThis, 5);
-        result.put(globalThis, JSC.ZigString.static("root"), root.toValueGC(globalThis));
-        result.put(globalThis, JSC.ZigString.static("dir"), dir.toValueGC(globalThis));
-        result.put(globalThis, JSC.ZigString.static("base"), base.toValueGC(globalThis));
-        result.put(globalThis, JSC.ZigString.static("ext"), ext.toValueGC(globalThis));
-        result.put(globalThis, JSC.ZigString.static("name"), name_.toValueGC(globalThis));
-        return result;
+        return .{ .root = root, .dir = dir, .base = base, .ext = ext, .name = _name };
     }
-    pub fn relative(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
+
+    pub inline fn parsePosix(path: []const u8) ParsedPath(u8) {
+        return @This().parsePosixT(u8, path);
+    }
+
+    pub inline fn parseWindows(path: []const u8) ParsedPath(u8) {
+        return @This().parseWindowsT(u8, path);
+    }
+
+    pub fn parse(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
-        var arguments = args_ptr[0..args_len];
+        const path_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, path_ptr, "path", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
 
-        if (args_len > 1 and JSC.JSValue.eqlValue(args_ptr[0], args_ptr[1]))
-            return JSC.ZigString.init("").toValue(globalThis);
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
 
-        var from_slice: JSC.ZigString.Slice = if (args_len > 0) arguments[0].toSlice(globalThis, heap_allocator) else JSC.ZigString.Slice.empty;
-        defer from_slice.deinit();
-        var to_slice: JSC.ZigString.Slice = if (args_len > 1) arguments[1].toSlice(globalThis, heap_allocator) else JSC.ZigString.Slice.empty;
-        defer to_slice.deinit();
-
-        const from = from_slice.slice();
-        const to = to_slice.slice();
+        var path = path_ptr.toSlice(globalThis, allocator);
+        defer path.deinit();
 
         const out = if (!isWindows)
-            PathHandler.relativePlatform(from, to, .posix, true)
+            @This().parsePosix(path.slice())
         else
-            PathHandler.relativePlatform(from, to, .windows, true);
+            @This().parseWindows(path.slice());
 
-        var out_str = JSC.ZigString.init(out);
-        if (from_slice.isAllocated() or to_slice.isAllocated()) out_str.setOutputEncoding();
-        return out_str.toValueGC(globalThis);
+        var jsObject = JSC.JSValue.createEmptyObject(globalThis, 5);
+        jsObject.put(globalThis, JSC.ZigString.static("root"), JSC.ZigString.init(out.root).withEncoding().toValueGC(globalThis));
+        jsObject.put(globalThis, JSC.ZigString.static("dir"), JSC.ZigString.init(out.dir).withEncoding().toValueGC(globalThis));
+        jsObject.put(globalThis, JSC.ZigString.static("base"), JSC.ZigString.init(out.base).withEncoding().toValueGC(globalThis));
+        jsObject.put(globalThis, JSC.ZigString.static("ext"), JSC.ZigString.init(out.ext).withEncoding().toValueGC(globalThis));
+        jsObject.put(globalThis, JSC.ZigString.static("name"), JSC.ZigString.init(out.name).withEncoding().toValueGC(globalThis));
+        return jsObject;
+    }
+
+    /// Based on Node v21.6.1 path.posix.relative:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1193
+    pub fn relativePosixT(comptime T: type, from: []const T, to: []const T, buf: []T) []const T {
+        // validateString of `from` and `to` are performed in fn pub relative.
+
+        if (std.mem.eql(T, from, to)) {
+            return comptime L(T, "");
+        }
+
+        // Trim leading forward slashes.
+        // Backed by expandable varLenTmpBuf1 because fromOrig may be long.
+        const fromOrig = @This().resolvePosixT(T, &.{ from }, varLenTmpBuf1);
+        const fromOrigLen = fromOrig.len;
+        // Leave toOrig backed by buf.
+        const toOrig = @This().resolvePosixT(T, &.{ to }, buf);
+
+        if (std.mem.eql(T, fromOrig, toOrig)) {
+            return comptime L(T, "");
+        }
+
+        const fromStart = 1;
+        const fromEnd = fromOrigLen;
+        const fromLen = fromEnd - fromStart;
+        const toOrigLen = toOrig.len;
+        var toStart: usize = 1;
+        const toLen = toOrigLen - toStart;
+
+        // Compare paths to find the longest common path from root
+        const smallestLength = @min(fromLen, toLen);
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var lastCommonSep: ?usize = null;
+
+        var matchesAllOfSmallest = false;
+        // Add a block to isolate `i`.
+        {
+            var i: usize = 0;
+            while (i < smallestLength) : (i += 1) {
+                const fromByte = fromOrig[fromStart + i];
+                if (fromByte != toOrig[toStart + i]) {
+                    break;
+                } else if (fromByte == CHAR_FORWARD_SLASH) {
+                    lastCommonSep = i;
+                }
+            }
+            matchesAllOfSmallest = i == smallestLength;
+        }
+        if (matchesAllOfSmallest) {
+            if (toLen > smallestLength) {
+                if (toOrig[toStart + smallestLength] == CHAR_FORWARD_SLASH) {
+                    // We get here if `from` is the exact base path for `to`.
+                    // For example: from='/foo/bar'; to='/foo/bar/baz'
+                    return toOrig[toStart + smallestLength + 1 ..toOrigLen];
+                }
+                if (smallestLength == 0) {
+                    // We get here if `from` is the root
+                    // For example: from='/'; to='/foo'
+                    return toOrig[toStart + smallestLength ..toOrigLen];
+                }
+            } else if (fromLen > smallestLength) {
+                if (fromOrig[fromStart + smallestLength] == CHAR_FORWARD_SLASH) {
+                    // We get here if `to` is the exact base path for `from`.
+                    // For example: from='/foo/bar/baz'; to='/foo/bar'
+                    lastCommonSep = smallestLength;
+                } else if (smallestLength == 0) {
+                    // We get here if `to` is the root.
+                    // For example: from='/foo/bar'; to='/'
+                    lastCommonSep = 0;
+                }
+            }
+        }
+
+        var bufOffset: usize = 0;
+        var bufSize: usize = 0;
+
+        var out: []const T = comptime L(T, "");
+        // Add a block to isolate `i`.
+        {
+            // Generate the relative path based on the path difference between `to`
+            // and `from`.
+            
+            // Translated from the following JS code:
+            //  for (i = fromStart + lastCommonSep + 1; i <= fromEnd; ++i) {
+            var i: usize = fromStart + (if (lastCommonSep != null) lastCommonSep.? + 1 else 0);
+            while (i <= fromEnd) : (i += 1) {
+                if (i == fromEnd or fromOrig[i] == CHAR_FORWARD_SLASH) {
+                    // Translated from the following JS code:
+                    //   out += out.length === 0 ? '..' : '/..';
+                    if (out.len > 0) {
+                        bufOffset = bufSize;
+                        bufSize += 3;
+                        fixedLenTmpBuf1[bufOffset] = CHAR_FORWARD_SLASH;
+                        fixedLenTmpBuf1[bufOffset + 1] = CHAR_DOT;
+                        fixedLenTmpBuf1[bufOffset + 2] = CHAR_DOT;
+                    } else {
+                        bufSize = 2;
+                        fixedLenTmpBuf1[0] = CHAR_DOT;
+                        fixedLenTmpBuf1[1] = CHAR_DOT;
+                    }
+                    out = fixedLenTmpBuf1[0 ..bufSize];
+                }
+            }
+        }
+
+        // Lastly, append the rest of the destination (`to`) path that comes after
+        // the common path parts.
+
+        // Translated from the following JS code:
+        //   return `${out}${StringPrototypeSlice(to, toStart + lastCommonSep)}`;
+        toStart = if (lastCommonSep != null) toStart + lastCommonSep.? else 0;
+        const sliceSize = toOrigLen - toStart;
+        const outLen = out.len;
+        bufSize = outLen;
+        if (sliceSize > 0) {
+            bufOffset = bufSize;
+            bufSize += sliceSize;
+            // Copy from toOrig, backed by buf, to varLenTmpBuf1 
+            // since fromOrig is no longer being referenced.
+            @memcpy(varLenTmpBuf1[0 ..sliceSize], toOrig[toStart ..toOrigLen]);
+            @memcpy(buf[bufOffset ..bufSize], varLenTmpBuf1[0 ..sliceSize]);
+        }
+        if (outLen > 0) {
+            @memcpy(buf[0 ..outLen], out);
+        }
+        const result = buf[0 ..bufSize];
+        return result;
+    }
+
+    /// Based on Node v21.6.1 path.win32.relative:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L500
+    pub fn relativeWindowsT(comptime T: type, from: []const T, to: []const T, buf: []T) []const T {
+        // validateString of `from` and `to` are performed in fn pub relative.
+
+        if (std.mem.eql(T, from, to)) {
+            return comptime L(T, "");
+        }
+
+        // Backed by expandable varLenTmpBuf1 because fromOrig may be long.
+        const fromOrig = @This().resolveWindowsT(T, &.{ from }, varLenTmpBuf1);
+        const fromOrigLen = fromOrig.len;
+        // Leave toOrig backed by buf.
+        const toOrig = @This().resolveWindowsT(T, &.{ to }, buf);
+
+        if (
+            std.mem.eql(T, fromOrig, toOrig) or
+            @This().eqlIgnoreCaseT(T, fromOrig, toOrig)
+        ) {
+            return comptime L(T, "");
+        }
+
+        const toOrigLen = toOrig.len;
+
+        // Trim leading backslashes
+        var fromStart: usize = 0;
+        while (fromStart < fromOrigLen and 
+                fromOrig[fromStart] == CHAR_BACKWARD_SLASH) {
+            fromStart += 1;
+        }
+
+        // Trim trailing backslashes (applicable to UNC paths only)
+        var fromEnd = fromOrigLen;
+        while (fromEnd - 1 > fromStart and 
+                fromOrig[fromEnd - 1] == CHAR_BACKWARD_SLASH) {
+            fromEnd -= 1;
+        }
+
+        const fromLen = fromEnd - fromStart;
+
+        // Trim leading backslashes
+        var toStart: usize = 0;
+        while (toStart < toOrigLen and
+                toOrig[toStart] == CHAR_BACKWARD_SLASH) {
+            toStart = toStart + 1;
+        }
+
+        // Trim trailing backslashes (applicable to UNC paths only)
+        var toEnd = toOrigLen;
+        while (toEnd - 1 > toStart and 
+                toOrig[toEnd - 1] == CHAR_BACKWARD_SLASH) {
+            toEnd -= 1;
+        }
+
+        const toLen = toEnd - toStart;
+
+        // Compare paths to find the longest common path from root
+        const smallestLength = @min(fromLen, toLen);
+        // We use an optional value instead of -1, as in Node code, for easier number type use.
+        var lastCommonSep: ?usize = null;
+
+        var matchesAllOfSmallest = false;
+        // Add a block to isolate `i`.
+        {
+            var i: usize = 0;
+            while (i < smallestLength) : (i += 1) {
+                const fromByte = fromOrig[fromStart + i];
+                if (@This().toLowerT(T, fromByte) != @This().toLowerT(T, toOrig[toStart + i])) {
+                    break;
+                } else if (fromByte == CHAR_BACKWARD_SLASH) {
+                    lastCommonSep = i;
+                }
+            }
+            matchesAllOfSmallest = i == smallestLength;
+        }
+
+        // We found a mismatch before the first common path separator was seen, so
+        // return the original `to`.
+        if (!matchesAllOfSmallest) {
+            if (lastCommonSep == null) {
+                return toOrig;
+            }
+        } else {
+            if (toLen > smallestLength) {
+                if (toOrig[toStart + smallestLength] == CHAR_BACKWARD_SLASH) {
+                    // We get here if `from` is the exact base path for `to`.
+                    // For example: from='C:\foo\bar'; to='C:\foo\bar\baz'
+                    return toOrig[toStart + smallestLength + 1 ..toOrigLen];
+                }
+                if (smallestLength == 2) {
+                    // We get here if `from` is the device root.
+                    // For example: from='C:\'; to='C:\foo'
+                    return toOrig[toStart + smallestLength ..toOrigLen];
+                }
+            }
+            if (fromLen > smallestLength) {
+                if (fromOrig[fromStart + smallestLength] == CHAR_BACKWARD_SLASH) {
+                    // We get here if `to` is the exact base path for `from`.
+                    // For example: from='C:\foo\bar'; to='C:\foo'
+                    lastCommonSep = smallestLength;
+                } else if (smallestLength == 2) {
+                    // We get here if `to` is the device root.
+                    // For example: from='C:\foo\bar'; to='C:\'
+                    lastCommonSep = 3;
+                }
+            }
+            if (lastCommonSep == null) {
+                lastCommonSep = 0;
+            }
+        }
+
+        var bufOffset: usize = 0;
+        var bufSize: usize = 0;
+
+        var out: []const T = comptime L(T, "");
+        // Add a block to isolate `i`.
+        {
+            // Generate the relative path based on the path difference between `to` and
+            // `from`
+            var i: usize = fromStart + (if (lastCommonSep != null) lastCommonSep.? + 1 else 0);
+            while (i <= fromEnd) : (i += 1) {
+                if (i == fromEnd or fromOrig[i] == CHAR_BACKWARD_SLASH) {
+                    // Translated from the following JS code:
+                    //   out += out.length === 0 ? '..' : '\\..';
+                    if (out.len > 0) {
+                        bufOffset = bufSize;
+                        bufSize += 3;
+                        fixedLenTmpBuf1[bufOffset] = CHAR_BACKWARD_SLASH;
+                        fixedLenTmpBuf1[bufOffset + 1] = CHAR_DOT;
+                        fixedLenTmpBuf1[bufOffset + 2] = CHAR_DOT;
+                    } else {
+                        bufSize = 2;
+                        fixedLenTmpBuf1[0] = CHAR_DOT;
+                        fixedLenTmpBuf1[1] = CHAR_DOT;
+                    }
+                    out = fixedLenTmpBuf1[0 ..bufSize];
+                }
+            }
+        }
+
+        // Translated from the following JS code:
+        //   toStart += lastCommonSep;
+        if (lastCommonSep == null) {
+            // If toStart would go negative make it toOrigLen - 1 to 
+            // mimic String#slice with a negative start.
+            toStart = if (toStart > 0) toStart - 1 else toOrigLen - 1;
+        } else {
+            toStart += lastCommonSep.?;
+        }
+
+        // Lastly, append the rest of the destination (`to`) path that comes after
+        // the common path parts
+        const outLen = out.len;
+        if (outLen > 0) {
+            const sliceSize = toEnd - toStart;
+            bufSize = outLen;
+            if (sliceSize > 0) {
+                bufOffset = bufSize;
+                bufSize += sliceSize;
+                // Copy from toOrig, backed by buf, to varLenTmpBuf1 
+                // since fromOrig is no longer being referenced.
+                @memcpy(varLenTmpBuf1[0 ..sliceSize], toOrig[toStart..toEnd]);
+                @memcpy(buf[bufOffset ..bufSize], varLenTmpBuf1[0 ..sliceSize]);
+            }
+            @memcpy(buf[0 ..outLen], out);
+            return buf[0 ..bufSize];
+        }
+        
+        if (toOrig[toStart] == CHAR_BACKWARD_SLASH) {
+            toStart += 1;
+        }
+        return toOrig[toStart..toEnd];
+    }
+
+    pub inline fn relativePosix(from: []const u8, to: []const u8, buf: []u8) []const u8 {
+        return @This().relativePosixT(u8, from, to, buf);
+    }
+
+    pub inline fn relativeWindows(from: []const u8, to: []const u8, buf: []u8) []const u8 {
+        return @This().relativeWindowsT(u8, from, to, buf);
+    }
+
+    pub fn relative(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
+        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
+        const from_ptr = if (args_len > 0) args_ptr[0] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, from_ptr, "from", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
+        const to_ptr = if (args_len > 1) args_ptr[1] else JSC.JSValue.jsUndefined();
+        // Supress exeption in zig. It does throw in JS land.
+        validateString(globalThis, to_ptr, "to", .{}) catch {
+            return JSC.JSValue.jsUndefined();
+        };
+
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
+
+        var from = from_ptr.toSlice(globalThis, allocator);
+        defer from.deinit();
+
+        var to = to_ptr.toSlice(globalThis, allocator);
+        defer from.deinit();
+
+        const buf = getBufAlloc(allocator, from.len + to.len) catch {
+            // Supress exeption in zig. It does throw in JS land.
+            globalThis.throwOutOfMemory();
+            return JSC.JSValue.jsUndefined();
+        };
+        defer allocator.free(buf);
+
+        const out = if (!isWindows)
+            @This().relativePosix(from.slice(), to.slice(), buf)
+        else
+            @This().relativeWindows(from.slice(), to.slice(), buf);
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+    }
+
+    /// Based on Node v21.6.1 path.posix.resolve:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L1095
+    pub fn resolvePosixT(comptime T: type, paths: []const []const T, buf: []T) []const T {
+        // Backed by expandable varLenTmpBuf3 because resolvedPath may be long.
+        // We use varLenTmpBuf3 here because resolvePosixT is called by other methods and using
+        // varLenTmpBuf3 here avoids stepping on others' toes.
+        var resolvedPath: []const T = comptime L(T, "");
+        var resolvedAbsolute: bool = false;
+
+        var bufOffset: usize = 0;
+        var bufSize: usize = 0;
+
+        var i: i64 = if (paths.len == 0) -1 else @as(i64, @intCast(paths.len - 1));
+        while (i >= -1 and !resolvedAbsolute) : (i -= 1) {
+            var path: []const T = comptime L(T, "");
+            if (i >= 0) {
+                path = paths[@as(usize, @intCast(i))];
+            } else {
+                const cwd = @This().posixCwd(buf);
+                path = if (@TypeOf(T) == u16) std.unicode.utf8ToUtf16LeStringLiteral(cwd) else cwd;
+            }
+            // validateString of `path` is performed in fn pub resolve.
+            const len = path.len;
+
+            // Skip empty entries
+            if (len == 0) {
+                continue;
+            }
+
+            // Translated from the following JS code:
+            //   resolvedPath = `${path}/${resolvedPath}`;
+            const resolvedPathLen = resolvedPath.len;
+            if (resolvedPathLen > 0) {
+                // Move all bytes to the right by path.len + 1
+                bufOffset = len + 1;
+                var j: usize = resolvedPathLen - 1;
+                while (j >= 0) : (j -= if (j > 0) 1 else break) {
+                    varLenTmpBuf3[j + bufOffset] = resolvedPath[j];
+                }
+            }
+            bufSize = len;
+            @memcpy(varLenTmpBuf3[0 ..bufSize], path);
+            bufSize += 1;
+            varLenTmpBuf3[len] = CHAR_FORWARD_SLASH;
+            bufSize += resolvedPathLen;
+
+            resolvedPath = varLenTmpBuf3[0 ..bufSize];
+            resolvedAbsolute = path[0] == CHAR_FORWARD_SLASH;
+        }
+
+        // Exit early for empty path.
+        if (resolvedPath.len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
+        }
+
+        // At this point the path should be resolved to a full absolute path, but
+        // handle relative paths to be safe (might happen when process.cwd() fails)
+
+        // Normalize the path
+        const bufBackedNormalizedPath = @This().normalizeStringT(T, resolvedPath, !resolvedAbsolute, CHAR_FORWARD_SLASH, .posix, buf);
+        // Move resolvedPath from bufBackedNormalizedPath to varLenTmpBuf3
+        bufSize = bufBackedNormalizedPath.len;
+        @memcpy(varLenTmpBuf3[0 ..bufSize], bufBackedNormalizedPath);
+        resolvedPath = varLenTmpBuf3[0 ..bufSize];
+
+        // Translated from the following JS code:
+        //   if (resolvedAbsolute) {
+        //     return `/${resolvedPath}`;
+        //   }
+        if (resolvedAbsolute) {
+            bufSize = 1;
+            buf[0] = CHAR_FORWARD_SLASH;
+            bufOffset = bufSize;
+            bufSize += resolvedPath.len;
+            @memcpy(buf[bufOffset ..bufSize], resolvedPath);
+            return buf[0 ..bufSize];
+        }
+        // Translated from the following JS code:
+        //   return resolvedPath.length > 0 ? resolvedPath : '.';
+        return if (resolvedPath.len > 0) resolvedPath else comptime L(T, CHAR_STR_DOT);
+    }
+
+    /// Based on Node v21.6.1 path.win32.resolve:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L162
+    pub fn resolveWindowsT(comptime T: type, paths: []const []const T, buf: []T) []const T {
+        const isSepT = @This().isSepWindowsT;
+
+        // Backed by fixedLenTmpBuf2
+        var resolvedDevice: []const T = comptime L(T, "");
+        // Backed by expandable varLenTmpBuf3 because resolvedTail may be long.
+        // We use varLenTmpBuf3 here because resolvePosixT is called by other methods and using
+        // varLenTmpBuf3 here avoids stepping on others' toes.
+        var resolvedTail: []const T = comptime L(T, "");
+        var resolvedAbsolute: bool = false;
+
+        var bufOffset: usize = 0;
+        var bufSize: usize = 0;
+
+        var envPath: ?[]const T = null;
+        var arena: ?bun.ArenaAllocator = null;
+        var arena_allocator: ?std.mem.Allocator = null;
+
+        defer {
+            if (arena != null) {
+                arena.?.deinit();
+            }
+            if (envPath != null) {
+                arena_allocator.?.free(envPath.?);
+            }
+        }
+ 
+        var i: i64 = if (paths.len == 0) -1 else @as(i64, @intCast(paths.len - 1));
+        while (i >= -1) : (i -= 1) {
+            // Backed by expandable varLenTmpBuf2, to not conflict with varLenTmpBuf3 backed resolvedTail, 
+            // because path may be long.
+            var path: []const T = comptime L(T, "");
+            if (i >= 0) {
+                path = paths[@as(usize, @intCast(i))];
+                // validateString of `path` is performed in fn pub resolve.
+                
+                // Skip empty entries
+                if (path.len == 0) {
+                    continue;
+                }
+            } else if (resolvedDevice.len == 0) {
+                // Use varLenTmpBuf2 because cwd is stored in path.
+                const cwd = @This().getCwd(varLenTmpBuf2);
+                path = if (@TypeOf(T) == u16) std.unicode.utf8ToUtf16LeStringLiteral(cwd) else cwd;
+            } else {
+                // Windows has the concept of drive-specific current working
+                // directories. If we've resolved a drive letter but not yet an
+                // absolute path, get cwd for that drive, or the process cwd if
+                // the drive cwd is not available. We're sure the device is not
+                // a UNC path at this points, because UNC paths are always absolute.
+
+                // Translated from the following JS code:
+                //   path = process.env[`=${resolvedDevice}`] || process.cwd();
+                envPath = brk: {
+                    bufSize = 1;
+                    // Use varLenTmpBuf2 for the env key beause it's used to get the path.
+                    varLenTmpBuf2[0] = '=';
+                    bufOffset = bufSize;
+                    bufSize += resolvedDevice.len;
+                    @memcpy(varLenTmpBuf2[bufOffset ..bufSize], resolvedDevice);
+                    // Translated from the following JS code:
+                    //   process.env[`=${resolvedDevice}`]
+                    const key = varLenTmpBuf2[0 ..bufSize];
+                    if (arena_allocator == null) {
+                        arena = bun.ArenaAllocator.init(heap_allocator);
+                        arena_allocator = arena.?.allocator();
+                    }
+                    // TODO: Enable test once spawnResult.stdout works on Windows.
+                    // test/js/node/path/resolve.test.js
+                    break :brk std.process.getEnvVarOwned(arena_allocator.?, key) catch null orelse null;
+                };
+                if (envPath == null) {
+                    // Use varLenTmpBuf2 because cwd is stored in path.
+                    const cwd = @This().getCwd(varLenTmpBuf2);
+                    path = if (@TypeOf(T) == u16) std.unicode.utf8ToUtf16LeStringLiteral(cwd) else cwd;
+                    // We must set envPath here so that it doesn't hit the null check below.
+                    envPath = path;
+                } else {
+                    bufSize = envPath.?.len;
+                    @memcpy(varLenTmpBuf2[0 ..bufSize], envPath.?);
+                    path = varLenTmpBuf2[0 ..bufSize];
+                }
+
+                // Verify that a cwd was found and that it actually points
+                // to our drive. If not, default to the drive's root.
+
+                // Translated from the following JS code:
+                //   if (path === undefined ||
+                //     (StringPrototypeToLowerCase(StringPrototypeSlice(path, 0, 2)) !==
+                //     StringPrototypeToLowerCase(resolvedDevice) &&
+                //     StringPrototypeCharCodeAt(path, 2) === CHAR_BACKWARD_SLASH)) {
+                if (
+                    envPath == null or  
+                    (path[2] == CHAR_BACKWARD_SLASH and 
+                    !@This().eqlIgnoreCaseT(T, path[0 ..2], resolvedDevice))
+                 ) {
+                    // Translated from the following JS code:
+                    //   path = `${resolvedDevice}\\`;
+                    bufSize = resolvedDevice.len;
+                    @memcpy(varLenTmpBuf2[0 ..bufSize], resolvedDevice);
+                    bufOffset = bufSize;
+                    bufSize += 1;
+                    varLenTmpBuf2[bufOffset] = CHAR_BACKWARD_SLASH;
+                    path = varLenTmpBuf2[0 ..bufSize];
+                }
+            }
+
+            const len = path.len;
+            var rootEnd: usize = 0;
+            // Backed by fixedLenTmpBuf3
+            var device: []const T = comptime L(T, "");
+            // Prefix with _ to avoid shadowing the identifier in the outer scope.
+            var _isAbsolute: bool = false;
+            const byte0 = if (len > 0) path[0] else 0;
+
+            // Try to match a root
+            if (len == 1) {
+                if (isSepT(T, byte0)) {
+                    // `path` contains just a path separator
+                    rootEnd = 1;
+                    _isAbsolute = true;
+                }
+            } else if (isSepT(T, byte0)) {
+                // Possible UNC root
+
+                // If we started with a separator, we know we at least have an
+                // absolute path of some kind (UNC or otherwise)
+                _isAbsolute = true;
+
+                if (isSepT(T, path[1])) {
+                    // Matched double path separator at the beginning
+                    var j: usize = 2;
+                    var last: usize = j;
+                    // Match 1 or more non-path separators
+                    while (j < len and 
+                            !isSepT(T, path[j])) {
+                        j += 1;
+                    }
+                    if (j < len and j != last) {
+                        const firstPart = path[last ..j];
+                        // Matched!
+                        last = j;
+                        // Match 1 or more path separators
+                        while (j < len and 
+                                isSepT(T, path[j])) {
+                            j += 1;
+                        }
+                        if (j < len and j != last) {
+                            // Matched!
+                            last = j;
+                            // Match 1 or more non-path separators
+                            while (j < len and 
+                                    !isSepT(T, path[j])) {
+                                j += 1;
+                            }
+                            if (j == len or j != last) {
+                                // We matched a UNC root
+
+                                // Translated from the following JS code:
+                                //   device = 
+                                //     `\\\\${firstPart}\\${StringPrototypeSlice(path, last, j)}`;
+                                //   rootEnd = j;
+                                bufSize = 2;
+                                fixedLenTmpBuf3[0] = CHAR_BACKWARD_SLASH;
+                                fixedLenTmpBuf3[1] = CHAR_BACKWARD_SLASH;
+                                bufOffset = bufSize;
+                                bufSize += firstPart.len;
+                                @memcpy(fixedLenTmpBuf3[bufOffset ..bufSize], firstPart);
+                                bufOffset = bufSize;
+                                bufSize += 1;
+                                fixedLenTmpBuf3[bufOffset] = CHAR_BACKWARD_SLASH;
+                                const slice = path[last .. j];
+                                bufOffset = bufSize;
+                                bufSize += slice.len;
+                                @memcpy(fixedLenTmpBuf3[bufOffset ..bufSize], slice);
+
+                                device = fixedLenTmpBuf3[0 ..bufSize];
+                                rootEnd = j;
+                            }
+                        }
+                    }
+                } else {
+                    rootEnd = 1;
+                }
+            } else if (@This().isWindowsDeviceRootT(T, byte0) and 
+                        path[1] == CHAR_COLON) {
+                // Possible device root
+                fixedLenTmpBuf3[0] = path[0];
+                fixedLenTmpBuf3[1] = CHAR_COLON;
+
+                device = fixedLenTmpBuf3[0 ..2];
+                rootEnd = 2;
+                if (len > 2 and isSepT(T, path[2])) {
+                    // Treat separator following the drive name as an absolute path indicator
+                    _isAbsolute = true;
+                    rootEnd = 3;
+                }
+            }
+
+            if (device.len > 0) {
+                if (resolvedDevice.len > 0) {
+                    // Translated from the following JS code:
+                    //   if (StringPrototypeToLowerCase(device) !==
+                    //     StringPrototypeToLowerCase(resolvedDevice))
+                    if (!@This().eqlIgnoreCaseT(T, device, resolvedDevice)) {
+                        // This path points to another device, so it is not applicable
+                        continue;
+                    }
+                } else {
+                    bufSize = device.len;
+                    @memcpy(fixedLenTmpBuf2[0 ..bufSize], device);
+
+                    resolvedDevice = fixedLenTmpBuf2[0 ..bufSize];
+                }
+            }
+
+            if (resolvedAbsolute) {
+                if (resolvedDevice.len > 0) {
+                    break;
+                }
+            } else {
+                // Translated from the following JS code:
+                //   resolvedTail = `${StringPrototypeSlice(path, rootEnd)}\\${resolvedTail}`;
+                const sliceLen = len - rootEnd;
+                const resolvedTailLen = resolvedTail.len;
+                if (resolvedTailLen > 0) {
+                    // Move all bytes to the right by path slice.len + 1 for the separator
+                    bufOffset = sliceLen + 1;
+                    var j: usize = resolvedTailLen - 1;
+                    while (j >= 0) : (j -= if (j > 0) 1 else break) {
+                        varLenTmpBuf3[j + bufOffset] = resolvedTail[j];
+                    }
+                }
+                bufSize = sliceLen;
+                if (sliceLen > 0) {
+                    @memcpy(varLenTmpBuf3[0 ..bufSize], path[rootEnd ..len]);
+                }
+                bufOffset = bufSize;
+                bufSize += 1;
+                varLenTmpBuf3[bufOffset] = CHAR_BACKWARD_SLASH;
+                bufSize += resolvedTailLen;
+
+                resolvedTail = varLenTmpBuf3[0 ..bufSize];
+                resolvedAbsolute = _isAbsolute;
+
+                if (_isAbsolute and resolvedDevice.len > 0) {
+                    break;
+                }
+            }
+        }
+
+        // Exit early for empty path.
+        if (resolvedTail.len == 0) {
+            return comptime L(T, CHAR_STR_DOT);
+        }
+
+        // At this point, the path should be resolved to a full absolute path,
+        // but handle relative paths to be safe (might happen when std.process.cwdAlloc()
+        // fails)
+
+        // Normalize the tail path
+        const bufBackedNormalizedTail = @This().normalizeStringT(T, resolvedTail, !resolvedAbsolute, CHAR_BACKWARD_SLASH, .windows, buf);
+        // Move resolvedTail from bufBackedNormalizedTail to varLenTmpBuf3
+        bufSize = bufBackedNormalizedTail.len;
+        @memcpy(varLenTmpBuf3[0 ..bufSize], bufBackedNormalizedTail);
+        resolvedTail = varLenTmpBuf3[0 ..bufSize];
+
+        // Translated from the following JS code:
+        //   resolvedAbsolute ? `${resolvedDevice}\\${resolvedTail}`
+        if (resolvedAbsolute) {
+            bufSize = resolvedDevice.len;
+            @memcpy(buf[0 ..resolvedDevice.len], resolvedDevice);
+            bufOffset = bufSize;
+            bufSize += 1;
+            buf[bufOffset] = CHAR_BACKWARD_SLASH;
+            bufOffset = bufSize;
+            bufSize += resolvedTail.len;
+            @memcpy(buf[bufOffset ..bufSize], resolvedTail);
+            return buf[0 ..bufSize];
+        }
+        // Translated from the following JS code:
+        //   : `${resolvedDevice}${resolvedTail}` || '.'
+        if ((resolvedDevice.len + resolvedTail.len) > 0) {
+            bufSize = resolvedDevice.len;
+            @memcpy(buf[0 ..bufSize], resolvedDevice);
+            bufOffset = bufSize;
+            bufSize += resolvedTail.len;
+            @memcpy(buf[bufOffset ..bufSize], resolvedTail);
+            return buf[0 ..bufSize];
+        }
+        return comptime L(T, CHAR_STR_DOT);
+    }
+
+    pub inline fn resolvePosix(paths: []const []const u8, buf: []u8) []const u8 {
+        return @This().resolvePosixT(u8, paths, buf);
+    }
+
+    pub inline fn resolveWindows(paths: []const []const u8, buf: []u8) []const u8 {
+        return @This().resolveWindowsT(u8, paths, buf);
     }
 
     pub fn resolve(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
         if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
 
-        var stack_fallback_allocator = std.heap.stackFallback(
-            (32 * @sizeOf(string)),
-            heap_allocator,
-        );
-        var allocator = stack_fallback_allocator.get();
-        var out_buf: [bun.MAX_PATH_BYTES * 2]u8 = undefined;
-
-        var parts = allocator.alloc(string, args_len) catch unreachable;
-        defer allocator.free(parts);
-
         var arena = bun.ArenaAllocator.init(heap_allocator);
-        const arena_allocator = arena.allocator();
         defer arena.deinit();
+        const arena_allocator = arena.allocator();
 
-        var i: u16 = 0;
-        while (i < args_len) : (i += 1) {
-            parts[i] = args_ptr[i].toSlice(globalThis, arena_allocator).slice();
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_large, 
+            JSC.getAllocator(globalThis)
+        );
+        var allocator = stack_fallback.get();
+
+        var paths = allocator.alloc(string, args_len) catch bun.outOfMemory();
+        defer allocator.free(paths);
+
+        // Adding 2 bytes when Windows for the possible UNC root, i.e. "\\\\", addition.
+        var lenSum: usize = if (isWindows) 6 else 0;
+        for (0 ..args_len) |i| {
+            const path_ptr = args_ptr[i];
+            // Supress exeption in zig. It does throw in JS land.
+            validateString(globalThis, path_ptr, "paths[{d}]", .{i}) catch {
+                return JSC.JSValue.jsUndefined();
+            };
+            const path = path_ptr.toSlice(globalThis, arena_allocator).slice();
+            const len = path.len;
+            paths[i] = path;
+            // Add 1 for the separator.
+            lenSum += if (len > 0 and lenSum > 0) len + 1 else len;
         }
 
-        var out: JSC.ZigString = if (!isWindows)
-            JSC.ZigString.init(strings.withoutTrailingSlash(PathHandler.joinAbsStringBuf(Fs.FileSystem.instance.top_level_dir, &out_buf, parts, .posix)))
-        else
-            JSC.ZigString.init(strings.withoutTrailingSlashWindowsPath(PathHandler.joinAbsStringBuf(Fs.FileSystem.instance.top_level_dir, &out_buf, parts, .windows)));
+        const buf = getBufAlloc(allocator, lenSum) catch {
+            // Supress exeption in zig. It does throw in JS land.
+            globalThis.throwOutOfMemory();
+            return JSC.JSValue.jsUndefined();
+        };
+        defer allocator.free(buf);
 
-        if (arena.state.buffer_list.first != null)
-            out.setOutputEncoding();
+        const out = if (!isWindows) 
+            @This().resolvePosix(paths, buf) 
+        else 
+            @This().resolveWindows(paths, buf);
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
+    }
 
-        return out.toValueGC(globalThis);
+    /// Based on Node v21.6.1 path.win32.toNamespacedPath:
+    /// https://github.com/nodejs/node/blob/6ae20aa63de78294b18d5015481485b7cd8fbb60/lib/path.js#L622
+    pub fn toNamespacedPathWindowsT(comptime T: type, path: []const T, buf: []T) []const T {
+        // Type checkng of `path` is performed in fn pub toNamespacedPath.
+        // Leave resolvedPath backed by buf.
+        const resolvedPath = @This().resolveWindowsT(T, &.{ path }, buf);
+
+        const len = resolvedPath.len;
+        if (len <= 2) {
+            return path;
+        }
+
+        var bufSize: usize = 0;
+
+        const byte0 = resolvedPath[0];
+        if (byte0 == CHAR_BACKWARD_SLASH) {
+            // Possible UNC root
+            if (resolvedPath[1] == CHAR_BACKWARD_SLASH) {
+                const byte2 = resolvedPath[2];
+                if (byte2 != CHAR_QUESTION_MARK and byte2 != CHAR_DOT) {
+                    // Matched non-long UNC root, convert the path to a long UNC path
+
+                    // Translated from the following JS code:
+                    //   return `\\\\?\\UNC\\${StringPrototypeSlice(resolvedPath, 2)}`;
+                    
+                    // Move all bytes to the right by 6 so that the first two bytes are
+                    // overwritten by "\\\\?\\UNC\\" which is 8 bytes long.
+                    var i: usize = len - 1;
+                    while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                        buf[i + 6] = resolvedPath[i];
+                    }
+                    // Equiv to std.os.windows.NamespacePrefix.verbatim
+                    // https://github.com/ziglang/zig/blob/dcaf43674e35372e1d28ab12c4c4ff9af9f3d646/lib/std/os/windows.zig#L2358-L2374
+                    bufSize = len + 6;
+                    buf[0] = CHAR_BACKWARD_SLASH;
+                    buf[1] = CHAR_BACKWARD_SLASH;
+                    buf[2] = CHAR_QUESTION_MARK;
+                    buf[3] = CHAR_BACKWARD_SLASH;
+                    buf[4] = 'U';
+                    buf[5] = 'N';
+                    buf[6] = 'C';
+                    buf[7] = CHAR_BACKWARD_SLASH;
+                    return buf[0 ..bufSize];
+                }
+            }
+        } else if (
+            @This().isWindowsDeviceRootT(T, byte0) and
+            resolvedPath[1] == CHAR_COLON and
+            resolvedPath[2] == CHAR_BACKWARD_SLASH
+        ) {
+            // Matched device root, convert the path to a long UNC path
+
+            // Translated from the following JS code:
+            //   return `\\\\?\\${resolvedPath}`
+            
+            // Move all bytes to the right by 4
+            var i: usize = len - 1;
+            while (i >= 0) : (i -= if (i > 0) 1 else break) {
+                buf[i + 4] = resolvedPath[i];
+            }
+            // Equiv to std.os.windows.NamespacePrefix.verbatim
+            // https://github.com/ziglang/zig/blob/dcaf43674e35372e1d28ab12c4c4ff9af9f3d646/lib/std/os/windows.zig#L2358-L2374
+            bufSize = len + 4;
+            buf[0] = CHAR_BACKWARD_SLASH;
+            buf[1] = CHAR_BACKWARD_SLASH;
+            buf[2] = CHAR_QUESTION_MARK;
+            buf[3] = CHAR_BACKWARD_SLASH;
+            return buf[0 ..bufSize];
+        }
+        return path;
+    }
+
+    pub inline fn toNamespacedPathWindows(path: []const u8, buf: []u8) []const u8 {
+        return @This().toNamespacedPathWindowsT(u8, path, buf);
+    }
+
+    pub fn toNamespacedPath(globalThis: *JSC.JSGlobalObject, isWindows: bool, args_ptr: [*]JSC.JSValue, args_len: u16) callconv(.C) JSC.JSValue {
+        if (comptime is_bindgen) return JSC.JSValue.jsUndefined();
+        if (args_len == 0) return JSC.JSValue.jsUndefined();
+        var path_ptr = args_ptr[0];
+        // Act as an identity function for non-string values and non-Windows platforms.
+        // Note: this will *probably* throw somewhere.
+        if (!isWindows or !path_ptr.isString()) return path_ptr;
+
+        var stack_fallback = std.heap.stackFallback(
+            stack_fallback_size_small, 
+            JSC.getAllocator(globalThis)
+        );
+        const allocator = stack_fallback.get();
+        
+        var path = path_ptr.toSlice(globalThis, allocator);
+        defer path.deinit();
+        const len = path.len;
+        if (len == 0) return path_ptr;
+
+        const buf = getBufAlloc(allocator, len) catch {
+            // Supress exeption in zig. It does throw in JS land.
+            globalThis.throwOutOfMemory();
+            return JSC.JSValue.jsUndefined();
+        };
+        defer allocator.free(buf);
+
+        const out = @This().toNamespacedPathWindows(path.slice(), buf);
+        return JSC.ZigString.init(out).withEncoding().toValueGC(globalThis);
     }
 
     pub const Export = shim.exportFunctions(.{
@@ -2390,6 +4704,7 @@ pub const Path = struct {
         .parse = parse,
         .relative = relative,
         .resolve = resolve,
+        .toNamespacedPath = toNamespacedPath,
     });
 
     pub const Extern = [_][]const u8{"create"};
@@ -2426,6 +4741,9 @@ pub const Path = struct {
             @export(Path.resolve, .{
                 .name = Export[9].symbol_name,
             });
+            @export(Path.toNamespacedPath, .{
+                .name = Export[10].symbol_name,
+            });
         }
     }
 };
@@ -2436,7 +4754,7 @@ pub const Process = struct {
     }
 
     pub fn getExecPath(globalObject: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var buf: PathBuffer = undefined;
         const out = std.fs.selfExePath(&buf) catch {
             // if for any reason we are unable to get the executable path, we just return argv[0]
             return getArgv0(globalObject);
@@ -2465,10 +4783,10 @@ pub const Process = struct {
             // argv omits "bun" because it could be "bun run" or "bun" and it's kind of ambiguous
             // argv also omits the script name
             bun.argv().len -| 1,
-        ) catch unreachable;
+        ) catch bun.outOfMemory();
         defer allocator.free(args);
         var used: usize = 0;
-        const offset: usize = 1;
+        const offset = 1;
 
         for (bun.argv()[@min(bun.argv().len, offset)..]) |arg| {
             if (arg.len == 0)
@@ -2508,7 +4826,7 @@ pub const Process = struct {
             // argv omits "bun" because it could be "bun run" or "bun" and it's kind of ambiguous
             // argv also omits the script name
             args_count + 2,
-        ) catch unreachable;
+        ) catch bun.outOfMemory();
         var args_list = std.ArrayListUnmanaged(bun.String){ .items = args, .capacity = args.len };
         args_list.items.len = 0;
 
@@ -2548,8 +4866,8 @@ pub const Process = struct {
     }
 
     pub fn getCwd(globalObject: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
-        var buffer: [bun.MAX_PATH_BYTES]u8 = undefined;
-        switch (Syscall.getcwd(&buffer)) {
+        var buf: PathBuffer = undefined;
+        switch (Syscall.getcwd(&buf)) {
             .err => |err| {
                 return err.toJSC(globalObject);
             },
@@ -2568,7 +4886,7 @@ pub const Process = struct {
             return JSC.toInvalidArguments("path is required", .{}, globalObject.ref());
         }
 
-        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        var buf: PathBuffer = undefined;
         const slice = to.sliceZBuf(&buf) catch {
             return JSC.toInvalidArguments("Invalid path", .{}, globalObject.ref());
         };
