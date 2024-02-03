@@ -520,7 +520,7 @@ const Handlers = struct {
 };
 
 pub const H2FrameParser = struct {
-    pub const log = Output.scoped(.H2FrameParser, false);
+    pub const log = Output.scoped(.H2FrameParser, true);
     pub usingnamespace JSC.Codegen.JSH2FrameParser;
 
     strong_ctx: JSC.Strong = .{},
@@ -544,11 +544,13 @@ pub const H2FrameParser = struct {
     // we buffer requests until we get the first settings ACK
     writeBuffer: bun.ByteList = .{},
 
-
     streams: bun.U32HashMap(Stream),
 
     decoder: lshpack.lshpack_dec = undefined,
     encoder: lshpack.lshpack_enc = undefined,
+
+    threadlocal var shared_header_buffer: [MAX_HPACK_HEADER_SIZE]u8 = undefined;
+    threadlocal var shared_request_buffer: [16384]u8 = undefined;
 
     const Stream = struct {
         id: u32 = 0,
@@ -631,10 +633,10 @@ pub const H2FrameParser = struct {
         next: usize,
     };
 
-    pub fn decode(this: *H2FrameParser, header_buffer: *[MAX_HPACK_HEADER_SIZE]u8, src_buffer: []const u8) !HeaderValue {
+    pub fn decode(this: *H2FrameParser, src_buffer: []const u8) !HeaderValue {
         var xhdr: lshpack.lsxpack_header = .{};
 
-        lshpack.lsxpack_header_prepare_decode(&xhdr, header_buffer.ptr, 0, header_buffer.len);
+        lshpack.lsxpack_header_prepare_decode(&xhdr, &shared_header_buffer, 0, shared_header_buffer.len);
         const next = try lshpack.lshpack_decode(&this.decoder, src_buffer.ptr, src_buffer.len, &xhdr);
 
         const name = lshpack.lsxpack_header_get_name(&xhdr);
@@ -649,16 +651,16 @@ pub const H2FrameParser = struct {
         };
     }
 
-    pub fn encode(this: *H2FrameParser, header_buffer: *[MAX_HPACK_HEADER_SIZE]u8, dst_buffer: []u8, name: []const u8, value: []const u8, never_index: bool) !usize {
-        var xhdr: lshpack.lsxpack_header = .{ .indexed_type = if (never_index) 2 else 0 };
+    pub fn encode(this: *H2FrameParser, dst_buffer: []u8, name: []const u8, value: []const u8, never_index: bool) !usize {
+        var xhdr: lshpack.lsxpack_header = .{};
         const size = name.len + value.len;
         if (size > MAX_HPACK_HEADER_SIZE) {
             return error.HeaderTooLarge;
         }
 
-        @memcpy(header_buffer[0..name.len], name);
-        @memcpy(header_buffer[name.len..size], value);
-        lshpack.lsxpack_header_set_offset2(&xhdr, header_buffer.ptr, 0, name.len, name.len, value.len);
+        @memcpy(shared_header_buffer[0..name.len], name);
+        @memcpy(shared_header_buffer[name.len..size], value);
+        lshpack.lsxpack_header_set_offset2(&xhdr, &shared_header_buffer, 0, name.len, name.len, value.len);
         if (never_index) {
             xhdr.indexed_type = 2;
         }
@@ -831,7 +833,7 @@ pub const H2FrameParser = struct {
             .uint31 = windowSize.uint31,
         };
         cleanWindowSize.write(@TypeOf(writer), writer);
-        this.write(&buffer);   
+        this.write(&buffer);
     }
 
     pub fn dispatch(this: *H2FrameParser, comptime event: @Type(.EnumLiteral), value: JSC.JSValue) void {
@@ -845,6 +847,7 @@ pub const H2FrameParser = struct {
         JSC.markBinding(@src());
         const ctx_value = this.strong_ctx.get() orelse return;
         value.ensureStillAlive();
+        extra.ensureStillAlive();
         _ = this.handlers.callEventHandler(event, ctx_value, &[_]JSC.JSValue{ ctx_value, value, extra });
     }
 
@@ -852,6 +855,8 @@ pub const H2FrameParser = struct {
         JSC.markBinding(@src());
         const ctx_value = this.strong_ctx.get() orelse return;
         value.ensureStillAlive();
+        extra.ensureStillAlive();
+        extra2.ensureStillAlive();
         _ = this.handlers.callEventHandler(event, ctx_value, &[_]JSC.JSValue{ ctx_value, value, extra, extra2 });
     }
 
@@ -923,14 +928,13 @@ pub const H2FrameParser = struct {
     pub fn decodeHeaderBlock(this: *H2FrameParser, payload: []const u8, stream_id: u32, flags: u8) void {
         log("decodeHeaderBlock", .{});
 
-        var header_buffer: [MAX_HPACK_HEADER_SIZE]u8 = undefined;
         var offset: usize = 0;
 
         const globalObject = this.handlers.globalObject;
 
         const headers = JSC.JSValue.createEmptyObject(globalObject, 0);
         while (true) {
-            const header = this.decode(&header_buffer, payload[offset..]) catch break;
+            const header = this.decode(payload[offset..]) catch break;
             offset += header.next;
             log("header {s} {s}", .{ header.name, header.value });
             const value = JSC.ZigString.fromUTF8(header.value).toValueGC(globalObject);
@@ -1398,8 +1402,8 @@ pub const H2FrameParser = struct {
         writer: *H2FrameParser,
         shouldBuffer: bool = true,
         pub fn write(this: *const DirectWriterStruct, data: []const u8) !bool {
-            if(this.shouldBuffer) {
-                _ = this.writer.writeBuffer.write(this.writer.allocator, data) catch return false;    
+            if (this.shouldBuffer) {
+                _ = this.writer.writeBuffer.write(this.writer.allocator, data) catch return false;
                 return true;
             }
             this.writer.write(data);
@@ -1416,7 +1420,7 @@ pub const H2FrameParser = struct {
     }
 
     fn flush(this: *H2FrameParser) void {
-        if(this.writeBuffer.len > 0) {
+        if (this.writeBuffer.len > 0) {
             const slice = this.writeBuffer.slice();
             this.write(slice);
             // we will only flush one time
@@ -1984,9 +1988,7 @@ pub const H2FrameParser = struct {
         }
 
         // max frame size will be always at least 16384
-        var buffer: [16384 - FrameHeader.byteSize]u8 = undefined;
-        var header_buffer: [MAX_HPACK_HEADER_SIZE]u8 = undefined;
-        @memset(&buffer, 0);
+        var buffer = shared_request_buffer[0 .. shared_request_buffer.len - FrameHeader.byteSize];
 
         var encoded_size: usize = 0;
 
@@ -2042,7 +2044,7 @@ pub const H2FrameParser = struct {
                     defer value_slice.deinit();
                     const value = value_slice.slice();
                     log("encode header {s} {s}", .{ name, value });
-                    encoded_size += this.encode(&header_buffer, buffer[encoded_size..], name, value, never_index) catch {
+                    encoded_size += this.encode(buffer[encoded_size..], name, value, never_index) catch {
                         stream.state = .CLOSED;
                         stream.rstCode = @intFromEnum(ErrorCode.COMPRESSION_ERROR);
                         this.dispatchWithExtra(.onStreamError, JSC.JSValue.jsNumber(stream_id), JSC.JSValue.jsNumber(stream.rstCode));
@@ -2062,7 +2064,7 @@ pub const H2FrameParser = struct {
                 defer value_slice.deinit();
                 const value = value_slice.slice();
                 log("encode header {s} {s}", .{ name, value });
-                encoded_size += this.encode(&header_buffer, buffer[encoded_size..], name, value, never_index) catch {
+                encoded_size += this.encode(buffer[encoded_size..], name, value, never_index) catch {
                     stream.state = .CLOSED;
                     stream.rstCode = @intFromEnum(ErrorCode.COMPRESSION_ERROR);
                     this.dispatchWithExtra(.onStreamError, JSC.JSValue.jsNumber(stream_id), JSC.JSValue.jsNumber(stream.rstCode));
@@ -2180,9 +2182,7 @@ pub const H2FrameParser = struct {
         }
 
         // max frame size will be always at least 16384
-        var buffer: [16384 - FrameHeader.byteSize - 5]u8 = undefined;
-        var header_buffer: [MAX_HPACK_HEADER_SIZE]u8 = undefined;
-        @memset(&buffer, 0);
+        var buffer = shared_request_buffer[0 .. shared_request_buffer.len - FrameHeader.byteSize - 5];
 
         var encoded_size: usize = 0;
 
@@ -2253,7 +2253,7 @@ pub const H2FrameParser = struct {
                         defer value_slice.deinit();
                         const value = value_slice.slice();
                         log("encode header {s} {s}", .{ name, value });
-                        encoded_size += this.encode(&header_buffer, buffer[encoded_size..], name, value, never_index) catch {
+                        encoded_size += this.encode(buffer[encoded_size..], name, value, never_index) catch {
                             const stream = this.handleReceivedStreamID(stream_id) orelse {
                                 return JSC.JSValue.jsNumber(-1);
                             };
@@ -2277,7 +2277,7 @@ pub const H2FrameParser = struct {
                     defer value_slice.deinit();
                     const value = value_slice.slice();
                     log("encode header {s} {s}", .{ name, value });
-                    encoded_size += this.encode(&header_buffer, buffer[encoded_size..], name, value, never_index) catch {
+                    encoded_size += this.encode(buffer[encoded_size..], name, value, never_index) catch {
                         const stream = this.handleReceivedStreamID(stream_id) orelse {
                             return JSC.JSValue.jsNumber(-1);
                         };
@@ -2400,8 +2400,8 @@ pub const H2FrameParser = struct {
             .streamIdentifier = stream.id,
             .length = @intCast(encoded_size),
         };
-        
-        const writer = if(this.firstSettingsACK) this.toWriter() else this.getBufferWriter();
+
+        const writer = if (this.firstSettingsACK) this.toWriter() else this.getBufferWriter();
         frame.write(@TypeOf(writer), writer);
         //https://datatracker.ietf.org/doc/html/rfc7540#section-6.2
         if (has_priority) {
@@ -2441,9 +2441,9 @@ pub const H2FrameParser = struct {
             return .zero;
         }
         const buffer = args_list.ptr[0];
+        buffer.ensureStillAlive();
         if (buffer.asArrayBuffer(globalObject)) |array_buffer| {
             var bytes = array_buffer.byteSlice();
-
             // read all the bytes
             while (bytes.len > 0) {
                 const result = this.readBytes(bytes);
