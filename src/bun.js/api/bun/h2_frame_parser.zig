@@ -520,7 +520,7 @@ const Handlers = struct {
 };
 
 pub const H2FrameParser = struct {
-    pub const log = Output.scoped(.H2FrameParser, true);
+    pub const log = Output.scoped(.H2FrameParser, false);
     pub usingnamespace JSC.Codegen.JSH2FrameParser;
 
     strong_ctx: JSC.Strong = .{},
@@ -1917,7 +1917,9 @@ pub const H2FrameParser = struct {
         return JSC.JSValue.jsBoolean(true);
     }
     fn sendData(this: *H2FrameParser, stream_id: u32, payload: []const u8, close: bool) void {
-        const writer = this.toWriter();
+        log("sendData({}, {}, {})", .{ stream_id, payload.len, close });
+
+        const writer = if (this.firstSettingsACK) this.toWriter() else this.getBufferWriter();
         if (payload.len == 0) {
             // empty payload we still need to send a frame
             var dataHeader: FrameHeader = .{
@@ -1944,7 +1946,7 @@ pub const H2FrameParser = struct {
                     .length = size,
                 };
                 dataHeader.write(@TypeOf(writer), writer);
-                this.write(slice);
+                _ = writer.write(slice) catch 0;
             }
         }
     }
@@ -2081,9 +2083,9 @@ pub const H2FrameParser = struct {
             .streamIdentifier = stream.id,
             .length = @intCast(encoded_size),
         };
-        const writer = this.toWriter();
+        const writer = if (this.firstSettingsACK) this.toWriter() else this.getBufferWriter();
         frame.write(@TypeOf(writer), writer);
-        this.write(buffer[0..encoded_size]);
+        _ = writer.write(buffer[0..encoded_size]) catch 0;
 
         return JSC.JSValue.jsUndefined();
     }
