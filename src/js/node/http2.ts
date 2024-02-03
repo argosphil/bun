@@ -878,7 +878,7 @@ class ClientHttp2Session extends Http2Session {
     write(self: ClientHttp2Session, buffer: Buffer) {
       if (!self) return;
       const socket = self[bunHTTP2Socket];
-      if(!socket) return;
+      if (!socket) return;
       if (self.#connected) {
         // redirect writes to socket
         socket.write(buffer);
@@ -924,7 +924,7 @@ class ClientHttp2Session extends Http2Session {
 
     // TODO: make a native bindings on data and write and fallback to non-native
     socket.on("data", this.#onRead.bind(this));
-    
+
     // redirect the queued buffers
     const queue = this.#queue;
     while (queue.length) {
