@@ -336,6 +336,15 @@ pub fn lshpack_decode(dec: [*c]struct_lshpack_dec, src: [*]const u8, src_len: us
     }
     return @intFromPtr(s) - @intFromPtr(src);
 }
+
+pub fn lshpack_encode(enc: [*c]struct_lshpack_enc, dst: [*]u8, dst_len: usize, input: ?*struct_lsxpack_header) !usize {
+    const ptr = lshpack_enc_encode(enc, dst, dst + dst_len, input);
+    const end = @intFromPtr(ptr) - @intFromPtr(dst);
+    if (end <= 0) {
+        return error.UnableToDecode;
+    }
+    return end;
+}
 pub const __INT64_C = @import("std").zig.c_translation.Macros.L_SUFFIX;
 pub const __UINT64_C = @import("std").zig.c_translation.Macros.UL_SUFFIX;
 pub const INT8_MIN = -@as(c_int, 128);

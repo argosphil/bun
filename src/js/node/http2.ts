@@ -679,7 +679,10 @@ function emitAbortedNT(self, streams, streamId, error) {
   self.emit("streamError", error_instance);
 }
 class ClientHttp2Session extends Http2Session {
+  /// close indicates that we called closed
   #closed: boolean = false;
+  /// connected indicates that the connection/socket is connected
+  #connected: boolean = false;
   #queue: Array<Buffer> = [];
   #connections: number = 0;
   [bunHTTP2Socket]: TLSSocket | Socket | null;
@@ -854,6 +857,7 @@ class ClientHttp2Session extends Http2Session {
     },
     goaway(self: ClientHttp2Session, errorCode: number, lastStreamId: number, opaqueData: Buffer) {
       if (!self) return;
+      console.log("goaway", errorCode, lastStreamId, opaqueData?.toString());
       self.emit("goaway", errorCode, lastStreamId, opaqueData);
       if (errorCode !== 0) {
         for (let [_, stream] of self.#streams) {
@@ -874,12 +878,13 @@ class ClientHttp2Session extends Http2Session {
     write(self: ClientHttp2Session, buffer: Buffer) {
       if (!self) return;
       const socket = self[bunHTTP2Socket];
-      if (self.#closed) {
-        //queue
-        self.#queue.push(buffer);
-      } else {
+      if(!socket) return;
+      if (self.#connected) {
         // redirect writes to socket
         socket.write(buffer);
+      } else {
+        //queue
+        self.#queue.push(buffer);
       }
     },
   };
@@ -899,6 +904,7 @@ class ClientHttp2Session extends Http2Session {
   #onConnect() {
     const socket = this[bunHTTP2Socket];
     if (!socket) return;
+    this.#connected = true;
     // check if h2 is supported only for TLSSocket
     if (socket instanceof TLSSocket) {
       if (socket.alpnProtocol !== "h2") {
@@ -918,6 +924,7 @@ class ClientHttp2Session extends Http2Session {
 
     // TODO: make a native bindings on data and write and fallback to non-native
     socket.on("data", this.#onRead.bind(this));
+    
     // redirect the queued buffers
     const queue = this.#queue;
     while (queue.length) {
@@ -1129,6 +1136,7 @@ class ClientHttp2Session extends Http2Session {
   destroy(error?: Error, code?: number) {
     const socket = this[bunHTTP2Socket];
     this.#closed = true;
+    this.#connected = false;
     code = code || constants.NGHTTP2_NO_ERROR;
     if (socket) {
       this.goaway(code, 0, Buffer.alloc(0));
