@@ -868,7 +868,6 @@ pub const H2FrameParser = struct {
     pub fn write(this: *H2FrameParser, bytes: []const u8) void {
         JSC.markBinding(@src());
         log("write", .{});
-
         const output_value = this.handlers.binary_type.toJS(bytes, this.handlers.globalObject);
         this.dispatch(.onWrite, output_value);
     }
@@ -894,6 +893,16 @@ pub const H2FrameParser = struct {
         }
 
         this.currentFrame = null;
+
+        if (this.readBuffer.list.items.len > 0) {
+            // return buffered data
+            _ = this.readBuffer.appendSlice(payload) catch bun.outOfMemory();
+            return .{
+                .data = this.readBuffer.list.items,
+                .end = end,
+            };
+        }
+
         return .{
             .data = payload,
             .end = end,
@@ -1050,12 +1059,12 @@ pub const H2FrameParser = struct {
             const last_stream_id: u32 = @intCast(UInt31WithReserved.fromBytes(payload[0..4]).uint31);
             const error_code = UInt31WithReserved.fromBytes(payload[4..8]).toUInt32();
             const chunk = this.handlers.binary_type.toJS(payload[8..], this.handlers.globalObject);
+            this.readBuffer.reset();
             if (error_code != @intFromEnum(ErrorCode.NO_ERROR)) {
                 this.dispatchWith2Extra(.onGoAway, JSC.JSValue.jsNumber(error_code), JSC.JSValue.jsNumber(last_stream_id), chunk);
             } else {
                 this.dispatchWithExtra(.onGoAway, JSC.JSValue.jsNumber(last_stream_id), chunk);
             }
-            this.readBuffer.reset();
             return content.end;
         }
         return data.len;
@@ -1104,12 +1113,13 @@ pub const H2FrameParser = struct {
         if (handleIncommingPayload(this, data, frame.streamIdentifier)) |content| {
             const payload = content.data;
             const isNotACK = frame.flags & @intFromEnum(PingFrameFlags.ACK) == 0;
-            this.dispatchWithExtra(.onPing, this.handlers.binary_type.toJS(payload, this.handlers.globalObject), JSC.JSValue.jsBoolean(!isNotACK));
             // if is not ACK send response
             if (isNotACK) {
                 this.sendPing(true, payload);
             }
+            const buffer = this.handlers.binary_type.toJS(payload, this.handlers.globalObject);
             this.readBuffer.reset();
+            this.dispatchWithExtra(.onPing, buffer, JSC.JSValue.jsBoolean(!isNotACK));
             return content.end;
         }
         return data.len;
@@ -1164,7 +1174,6 @@ pub const H2FrameParser = struct {
                 stream.isWaitingMoreHeaders = false;
             }
 
-            this.readBuffer.reset();
             return content.end;
         }
 
@@ -1204,10 +1213,12 @@ pub const H2FrameParser = struct {
             }
             const end = payload.len - padding;
             if (offset > end) {
+                this.readBuffer.reset();
                 this.sendGoAway(frame.streamIdentifier, ErrorCode.FRAME_SIZE_ERROR, "invalid Headers frame size", this.lastStreamID);
                 return data.len;
             }
             this.decodeHeaderBlock(payload[offset..end], stream.id, frame.flags);
+            this.readBuffer.reset();
             stream.isWaitingMoreHeaders = frame.flags & @intFromEnum(HeadersFrameFlags.END_HEADERS) == 0;
             if (frame.flags & @intFromEnum(HeadersFrameFlags.END_STREAM) != 0) {
                 if (stream.isWaitingMoreHeaders) {
@@ -1222,8 +1233,6 @@ pub const H2FrameParser = struct {
             if (stream.endAfterHeaders) {
                 this.endStream(stream, ErrorCode.NO_ERROR);
             }
-
-            this.readBuffer.reset();
             return content.end;
         }
 
