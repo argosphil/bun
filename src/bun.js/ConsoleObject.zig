@@ -1708,10 +1708,33 @@ pub const Formatter = struct {
                     writer.failed = true;
                     return;
                 };
+		var close_brace = false;
+                if (value.isStringObjectLike()) {
+                    var string_name = ZigString.Empty;
+                    value.getClassName(this.globalThis, &string_name);
+
+		    if (!strings.eqlComptime(string_name.slice(), "String")) {
+                        this.addForNewLine(string_name.len + "[String ():]".len);
+                        writer.print(comptime Output.prettyFmt("<r><yellow>[String ({s}): ", enable_ansi_colors), .{
+                            string_name,
+                        });
+                    } else {
+		        this.addForNewLine(string_name.len + 3);
+                        writer.print(comptime Output.prettyFmt("<r><yellow>[{s}: ", enable_ansi_colors), .{
+                            string_name,
+			});
+                    }
+	            close_brace = true;
+                }
+
+		defer {
+		    if (close_brace)
+		        writer.print(comptime Output.prettyFmt("]<r>", enable_ansi_colors), .{});
+		}
                 defer str.deref();
                 this.addForNewLine(str.length());
 
-                if (this.quote_strings and jsType != .RegExpObject) {
+                if ((this.quote_strings or close_brace) and jsType != .RegExpObject) {
                     if (str.isEmpty()) {
                         writer.writeAll("\"\"");
                         return;
