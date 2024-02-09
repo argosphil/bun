@@ -3893,7 +3893,7 @@ pub fn indexOfNeedsEscape(slice: []const u8) ?u32 {
 
     for (remaining) |*char_| {
         const char = char_.*;
-        if (char > 127 or char < 0x20 or char == '\\' or char == '"') {
+        if (char >= 127 or char < 0x20 or char == '\\' or char == '"') {
             return @as(u32, @truncate(@intFromPtr(char_) - @intFromPtr(slice.ptr)));
         }
     }
