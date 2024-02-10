@@ -1719,7 +1719,7 @@ pub const Formatter = struct {
                             string_name,
                         });
                     } else {
-		        this.addForNewLine(string_name.len + 4);
+		        this.addForNewLine(string_name.len + 3);
                         writer.print(comptime Output.prettyFmt("<r><yellow>[{s}: ", enable_ansi_colors), .{
                             string_name,
 			});
@@ -1734,7 +1734,7 @@ pub const Formatter = struct {
                 defer str.deref();
                 this.addForNewLine(str.length());
 
-                if (this.quote_strings and jsType != .RegExpObject) {
+                if ((this.quote_strings or close_brace) and jsType != .RegExpObject) {
                     if (str.isEmpty()) {
                         writer.writeAll("\"\"");
                         return;
