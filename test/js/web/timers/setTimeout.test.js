@@ -155,6 +155,12 @@ it("Bun.sleep works with a Date object", async () => {
   expect(performance.now() - now).toBeGreaterThan(11);
 });
 
+it("Bun.sleep rounds towards Infinity", async () => {
+  const now = performance.now();
+  await Bun.sleep(1.5);
+  expect(performance.now() - now).toBeGreaterThan(1.5);
+});
+
 it("node.js timers/promises setTimeout propagates exceptions", async () => {
   const { setTimeout } = require("timers/promises");
   try {
