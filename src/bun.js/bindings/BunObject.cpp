@@ -349,7 +349,6 @@ JSC_DEFINE_HOST_FUNCTION(functionBunSleep,
     JSC::VM& vm = globalObject->vm();
 
     JSC::JSValue millisecondsValue = callFrame->argument(0);
-    int32_t countdown;
 
     if (millisecondsValue.inherits<JSC::DateInstance>()) {
         auto now = MonotonicTime::now();
@@ -363,7 +362,8 @@ JSC_DEFINE_HOST_FUNCTION(functionBunSleep,
         return JSC::JSValue::encode(JSC::JSValue {});
     }
 
-    countdown = std::ceil(millisecondsValue.asNumber());
+    millisecondsValue = JSC::jsNumber(std::ceil(millisecondsValue.asNumber()));
+    int32_t countdown = std::ceil(millisecondsValue.asNumber());
 
     Zig::GlobalObject* global = JSC::jsCast<Zig::GlobalObject*>(globalObject);
     JSC::JSPromise* promise = JSC::JSPromise::create(vm, globalObject->promiseStructure());
