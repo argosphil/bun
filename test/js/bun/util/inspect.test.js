@@ -15,10 +15,11 @@ it("prototype", () => {
     MessageEvent.prototype,
     CloseEvent.prototype,
     WebSocket.prototype,
+    String.prototype,
   ];
 
   for (let prototype of prototypes) {
-    for (let i = 0; i < 10; i++) expect(Bun.inspect(prototype).length > 0).toBeTrue();
+    for (let i = 0; i < 10; i++) expect(Bun.inspect(prototype).length).toBeGreaterThan(2);
   }
   Bun.gc(true);
 });
