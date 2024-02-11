@@ -157,6 +157,36 @@ it("Bun.sleep works with a Date object", async () => {
   expect(performance.now() - now).toBeGreaterThan(10);
 });
 
+it("Bun.sleep rounds towards Infinity", async () => {
+  const now = performance.now();
+  await Bun.sleep(1.5);
+  expect(performance.now() - now).toBeGreaterThan(1.5);
+});
+
+it("Bun.sleep(Date) fulfills after Date", async () => {
+    var a = 1707580753938;
+    var b = 1707580753939;
+    console.error({a, b, equals: a >= b});
+    expect(a).toBeGreaterThanOrEqual(b);
+    for (let i = 0; i < 200; i++) {
+    let ten_ms = new Date();
+    ten_ms.setMilliseconds(ten_ms.getMilliseconds() + 12);
+    await Bun.sleep(ten_ms);
+	let now = new Date();
+	if (!(+ten_ms <= +now)) {
+	    console.error({ten_ms: +ten_ms, now: +now, i});
+	}
+	expect(+now).toBeGreaterThanOrEqual(+ten_ms);
+    }
+});
+
+it("basic arithmetic", async () => {
+    var a = 1707580753938;
+    var b = 1707580753939;
+    console.error({a, b, equals: a >= b});
+    expect(a).toBeGreaterThanOrEqual(b);
+});
+
 it("node.js timers/promises setTimeout propagates exceptions", async () => {
   const { setTimeout } = require("timers/promises");
   try {
