@@ -3879,7 +3879,7 @@ pub fn indexOfNeedsEscape(slice: []const u8) ?u32 {
             const cmp = @as(AsciiVectorU1, @bitCast((vec > max_16_ascii))) | @as(AsciiVectorU1, @bitCast((vec < min_16_ascii))) |
                 @as(AsciiVectorU1, @bitCast(vec == @as(AsciiVector, @splat(@as(u8, '\\'))))) |
                 @as(AsciiVectorU1, @bitCast(vec == @as(AsciiVector, @splat(@as(u8, '"'))))) |
-                @as(AsciiVectorU1, @bitCast(vec == @as(AsciiVector, @splat(@as(u8, 127))))));
+                @as(AsciiVectorU1, @bitCast(vec == @as(AsciiVector, @splat(@as(u8, 127)))));
 
             if (@reduce(.Max, cmp) > 0) {
                 const bitmask = @as(AsciiVectorInt, @bitCast(cmp));
