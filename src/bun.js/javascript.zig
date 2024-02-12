@@ -571,6 +571,7 @@ pub const VirtualMachine = struct {
     active_tasks: usize = 0,
 
     rare_data: ?*JSC.RareData = null,
+    inspect_custom_map: JSC.JSValue = JSC.JSValue.jsUndefined(),
     is_us_loop_entered: bool = false,
     pending_internal_promise: *JSC.JSInternalPromise = undefined,
     auto_install_dependencies: bool = false,
