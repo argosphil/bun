@@ -737,6 +737,26 @@ pub fn which(
     return JSC.JSValue.jsNull();
 }
 
+pub fn set_inspect_custom_map(
+    globalThis: *JSC.JSGlobalObject,
+    callframe: *JSC.CallFrame,
+) callconv(.C) JSC.JSValue {
+    const arguments = callframe.arguments(4).slice();
+    if (arguments.len != 1)
+        return bun.String.empty.toJS(globalThis);
+
+    for (arguments) |arg| {
+        arg.protect();
+    }
+    const value = arguments[0];
+    const vm = globalThis.bunVM();
+
+    std.debug.print("old {any} new {any}\n", .{ vm.inspect_custom_map, value });
+    vm.inspect_custom_map.unprotect();
+    vm.inspect_custom_map = value;
+    return bun.String.empty.toJS(globalThis);
+}
+
 pub fn inspect(
     globalThis: *JSC.JSGlobalObject,
     callframe: *JSC.CallFrame,
@@ -854,6 +874,10 @@ pub fn getInspect(globalObject: *JSC.JSGlobalObject, _: *JSC.JSObject) callconv(
     const fun = JSC.createCallback(globalObject, ZigString.static("inspect"), 2, &inspect);
     var str = ZigString.init("nodejs.util.inspect.custom");
     fun.put(globalObject, ZigString.static("custom"), JSC.JSValue.symbolFor(globalObject, &str));
+    const vm = globalObject.bunVM();
+    fun.put(globalObject, ZigString.static("customMap"), vm.inspect_custom_map);
+    const fun2 = JSC.createCallback(globalObject, ZigString.static("setInspectCustomMap"), 1, &set_inspect_custom_map);
+    fun.put(globalObject, ZigString.static("setCustomMap"), fun2);
     return fun;
 }
 

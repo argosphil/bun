@@ -1053,6 +1053,26 @@ pub const Formatter = struct {
                 }
             }
 
+            const vm = globalThis.bunVM();
+            const map = vm.inspect_custom_map;
+
+            if (map.isObject()) {
+                if (map.get(globalThis, "get")) |getter| {
+                    const callback = getter.callWithThis(globalThis, map, &.{value});
+                    if (callback.isCallable(globalThis.vm())) {
+                        return .{
+                            .tag = .{
+                                .CustomFormattedObject = .{
+                                    .function = callback,
+                                    .this = value,
+                                },
+                            },
+                            .cell = js_type,
+                        };
+                    }
+                }
+            }
+
             if (js_type == .DOMWrapper) {
                 return .{
                     .tag = .{ .Private = {} },
