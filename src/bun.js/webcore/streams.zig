@@ -4406,6 +4406,8 @@ pub fn NewFIFO(comptime EventLoop: JSC.EventLoopKind) type {
             }
 
             var buf = buf_;
+            if (buf.len == 0)
+                return .{ .read = buf[0..0] };
             std.debug.assert(buf.len > 0);
 
             if (available_to_read) |amt| {
