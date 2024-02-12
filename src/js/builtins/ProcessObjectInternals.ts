@@ -76,14 +76,19 @@ export function getStdinStream(fd) {
   var readerRef;
 
   var shouldUnref = false;
+  let stream;
 
   function ref() {
     $debug("ref();", reader ? "already has reader" : "getting reader");
+    const noPreviousReader = !reader;
     reader ??= native.getReader();
     // TODO: remove this. likely we are dereferencing the stream
     // when there is still more data to be read.
     readerRef ??= setInterval(() => {}, 1 << 30);
     shouldUnref = false;
+    if (noPreviousReader && reader && stream) {
+      internalRead(stream);
+    }
   }
 
   function unref() {
@@ -127,7 +132,7 @@ export function getStdinStream(fd) {
   const tty = require("node:tty");
 
   const ReadStream = tty.isatty(fd) ? tty.ReadStream : require("node:fs").ReadStream;
-  const stream = new ReadStream(fd);
+  stream = new ReadStream(fd);
 
   const originalOn = stream.on;
 
@@ -204,10 +209,7 @@ export function getStdinStream(fd) {
 
   stream._read = function (size) {
     $debug("_read();", reader);
-    if (!reader) {
-      // TODO: this is wrong
-      this.push(null);
-    } else if (!shouldUnref) {
+    if (reader && !shouldUnref) {
       internalRead(this);
     }
   };
