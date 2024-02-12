@@ -1714,12 +1714,12 @@ pub const Formatter = struct {
                     value.getClassName(this.globalThis, &string_name);
 
                     if (!strings.eqlComptime(string_name.slice(), "String")) {
-                        this.addForNewLine(string_name.len + "[String ():]".len);
+                        this.addForNewLine(string_name.len + "[String (): ]".len);
                         writer.print(comptime Output.prettyFmt("<r><yellow>[String ({s}): ", enable_ansi_colors), .{
                             string_name,
                         });
                     } else {
-                        this.addForNewLine(string_name.len + 3);
+                        this.addForNewLine(string_name.len + 4);
                         writer.print(comptime Output.prettyFmt("<r><yellow>[{s}: ", enable_ansi_colors), .{
                             string_name,
                         });
