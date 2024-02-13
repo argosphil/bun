@@ -5248,7 +5248,12 @@ pub const JSZlib = struct {
         if (options_val_) |options_val| {
             if (options_val.isObject()) {
                 if (options_val.get(globalThis, "windowBits")) |window| {
-                    opts.windowBits = window.coerce(i32, globalThis);
+                    const bits = window.coerce(i32, globalThis);
+                    if (bits >= 0) {
+                        opts.windowBits = window.coerce(i32, globalThis);
+                    } else {
+                        return JSC.toInvalidArguments("windowBits need to be positive, not {d}", .{bits}, globalThis);
+                    }
                 }
 
                 if (options_val.get(globalThis, "level")) |level| {
