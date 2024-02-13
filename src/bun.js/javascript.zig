@@ -2580,7 +2580,7 @@ pub const VirtualMachine = struct {
                 @max(frame.position.line, 0),
                 @max(frame.position.column_start, 0),
             )) |mapping| {
-                frame.position.line = mapping.original.lines;
+                frame.position.line = mapping.original.lines + 1;
                 frame.position.column_start = mapping.original.columns;
                 frame.remapped = true;
             } else {
@@ -2747,7 +2747,7 @@ pub const VirtualMachine = struct {
                     @max(frame.position.line, 0),
                     @max(frame.position.column_start, 0),
                 )) |mapping| {
-                    frame.position.line = mapping.original.lines;
+                    frame.position.line = mapping.original.lines + 1;
                     frame.remapped = true;
                     frame.position.column_start = mapping.original.columns;
                 }

@@ -157,7 +157,7 @@ pub const Mapping = struct {
             const step = count / 2;
             const i: usize = index + step;
             const mapping = generated[i];
-            if (mapping.lines < line or (mapping.lines == line and mapping.columns <= column)) {
+            if (mapping.lines + 1 < line or (mapping.lines + 1 == line and mapping.columns <= column)) {
                 index = i + 1;
                 count -|= step + 1;
             } else {
@@ -166,7 +166,7 @@ pub const Mapping = struct {
         }
 
         if (index > 0) {
-            if (generated[index - 1].lines == line) {
+            if (generated[index - 1].lines + 1 == line) {
                 return index - 1;
             }
         }
