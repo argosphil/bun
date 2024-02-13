@@ -1428,7 +1428,37 @@ pub const InternalState = struct {
         return this.received_last_chunk;
     }
 
+    fn decompressBytes2(this: *InternalState, buffer: []const u8, body_out_str: *MutableString, isDonep: bool) !void {
+        log("Decompressing {d} bytes\n", .{buffer.len});
+
+        defer this.compressed_body.reset();
+        var gzip_timer: std.time.Timer = undefined;
+
+        if (extremely_verbose)
+            gzip_timer = std.time.Timer.start() catch @panic("Timer failure");
+
+        try this.decompressor.updateBuffers(this.encoding, buffer, body_out_str);
+        this.decompressor.readAll(isDonep) catch |err| {
+            if (isDonep or error.ShortRead != err) {
+                Output.prettyErrorln("<r><red>Decompression error: {s}<r>", .{bun.asByteSlice(@errorName(err))});
+                Output.flush();
+                return err;
+            }
+        };
+
+        if (extremely_verbose)
+            this.gzip_elapsed = gzip_timer.read();
+    }
+
     fn decompressBytes(this: *InternalState, buffer: []const u8, body_out_str: *MutableString) !void {
+        if (buffer.len > 1) {
+            var i: u64 = 0;
+            while (i < buffer.len) {
+                decompressBytes2(this, buffer[i .. i + 1], body_out_str, false) catch |err| return err;
+                i += 1;
+            }
+            return;
+        }
         log("Decompressing {d} bytes\n", .{buffer.len});
 
         defer this.compressed_body.reset();
