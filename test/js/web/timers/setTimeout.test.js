@@ -164,27 +164,27 @@ it("Bun.sleep rounds towards Infinity", async () => {
 });
 
 it("Bun.sleep(Date) fulfills after Date", async () => {
-    var a = 1707580753938;
-    var b = 1707580753939;
-    console.error({a, b, equals: a >= b});
-    expect(a).toBeGreaterThanOrEqual(b);
-    for (let i = 0; i < 200; i++) {
+  var a = 1707580753938;
+  var b = 1707580753939;
+  console.error({ a, b, equals: a >= b });
+  expect(a).toBeGreaterThanOrEqual(b);
+  for (let i = 0; i < 200; i++) {
     let ten_ms = new Date();
     ten_ms.setMilliseconds(ten_ms.getMilliseconds() + 12);
     await Bun.sleep(ten_ms);
-	let now = new Date();
-	if (!(+ten_ms <= +now)) {
-	    console.error({ten_ms: +ten_ms, now: +now, i});
-	}
-	expect(+now).toBeGreaterThanOrEqual(+ten_ms);
+    let now = new Date();
+    if (!(+ten_ms <= +now)) {
+      console.error({ ten_ms: +ten_ms, now: +now, i });
     }
+    expect(+now).toBeGreaterThanOrEqual(+ten_ms);
+  }
 });
 
 it("basic arithmetic", async () => {
-    var a = 1707580753938;
-    var b = 1707580753939;
-    console.error({a, b, equals: a >= b});
-    expect(a).toBeGreaterThanOrEqual(b);
+  var a = 1707580753938;
+  var b = 1707580753939;
+  console.error({ a, b, equals: a >= b });
+  expect(a).toBeGreaterThanOrEqual(b);
 });
 
 it("node.js timers/promises setTimeout propagates exceptions", async () => {
