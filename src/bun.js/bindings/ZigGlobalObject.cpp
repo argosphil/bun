@@ -1338,13 +1338,7 @@ JSC_DEFINE_HOST_FUNCTION(functionSetTimeout,
         return JSC::JSValue::encode(JSC::JSValue {});
     }
 
-    if (UNLIKELY(!num.isNumber())) {
-        auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
-        JSC::throwTypeError(globalObject, scope, "setTimeout expects a number (milliseconds)"_s);
-        return JSC::JSValue::encode(JSC::JSValue {});
-    }
-
-    int32_t countdown = std::ceil(num.asNumber());
+    int32_t countdown = std::ceil(JSC__JSValue__coerceToDouble(JSC::JSValue::encode(num), globalObject));
 
 #ifdef BUN_DEBUG
     /** View the file name of the JS file that called this function
