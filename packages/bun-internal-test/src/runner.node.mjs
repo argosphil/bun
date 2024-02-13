@@ -1,3 +1,5 @@
+console.log("hello world");
+
 import * as action from "@actions/core";
 import { spawn, spawnSync } from "child_process";
 import { rmSync, writeFileSync, readFileSync } from "fs";
@@ -20,6 +22,8 @@ if (!(Number.isSafeInteger(force_ram_size_input) && force_ram_size_input > 0)) {
 
 const cwd = resolve(fileURLToPath(import.meta.url), "../../../../");
 process.chdir(cwd);
+
+console.log({cwd});
 
 const ci = !!process.env["GITHUB_ACTIONS"];
 const enableProgressBar = !ci;
@@ -60,6 +64,7 @@ function* findTests(dir, query) {
 
 // pick the last one, kind of a hack to allow 'bun run test bun-release' to test the release build
 let bunExe = (process.argv.length > 2 ? process.argv[process.argv.length - 1] : null) ?? "bun";
+console.log({bunExe});
 const { error, stdout: revision_stdout } = spawnSync(bunExe, ["--revision"], {
   env: { ...process.env, BUN_DEBUG_QUIET_LOGS: 1 },
 });
@@ -70,9 +75,13 @@ if (error) {
 }
 const revision = revision_stdout.toString().trim();
 
+console.log({revision});
+console.log({bunExe});
+console.log({env: process.env});
 const { error: error2, stdout: argv0_stdout } = spawnSync(bunExe, ["-e", "console.log(process.argv[0])"], {
   env: { ...process.env, BUN_DEBUG_QUIET_LOGS: 1 },
 });
+console.log({error2});
 if (error2) throw error2;
 const argv0 = argv0_stdout.toString().trim();
 
@@ -242,6 +251,7 @@ function writeProgressBar() {
 }
 
 while (queue.length > 0) {
+console.log({queue})
   if (running >= run_concurrency) {
     await new Promise(resolve => (on_entry_finish = resolve));
     continue;
@@ -264,6 +274,7 @@ while (queue.length > 0) {
     });
 }
 while (running > 0) {
+  console.log({running});
   await Promise.race([
     new Promise(resolve => (on_entry_finish = resolve)),
     new Promise(resolve => setTimeout(resolve, 1000)),
