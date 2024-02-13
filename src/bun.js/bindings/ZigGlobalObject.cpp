@@ -450,8 +450,8 @@ WTF::String Bun::formatStackTrace(JSC::VM& vm, JSC::JSGlobalObject* globalObject
                 ZigStackFrame remappedFrame;
                 memset(&remappedFrame, 0, sizeof(ZigStackFrame));
 
-                remappedFrame.position.line = originalLine.zeroBasedInt() + 1;
-                remappedFrame.position.column_start = 0;
+                remappedFrame.position.line = originalLine.zeroBasedInt();
+                remappedFrame.position.column_start = 1;
 
                 String sourceURLForFrame = err->sourceURL();
 
@@ -626,8 +626,8 @@ static String computeErrorInfoWithPrepareStackTrace(JSC::VM& vm, Zig::GlobalObje
         for (int i = 0; i < framesCount; i++) {
             remappedFrames[i].source_url = Bun::toString(lexicalGlobalObject, stackTrace.at(i).sourceURL());
             if (JSCStackFrame::SourcePositions* sourcePositions = stackTrace.at(i).getSourcePositions()) {
-                remappedFrames[i].position.line = sourcePositions->line.oneBasedInt();
-                remappedFrames[i].position.column_start = sourcePositions->startColumn.oneBasedInt() + 1;
+                remappedFrames[i].position.line = sourcePositions->line.zeroBasedInt();
+                remappedFrames[i].position.column_start = sourcePositions->startColumn.oneBasedInt();
             } else {
                 remappedFrames[i].position.line = -1;
                 remappedFrames[i].position.column_start = -1;
@@ -2783,8 +2783,8 @@ JSC_DEFINE_HOST_FUNCTION(errorConstructorFuncCaptureStackTrace, (JSC::JSGlobalOb
         memset(remappedFrames + i, 0, sizeof(ZigStackFrame));
         remappedFrames[i].source_url = Bun::toString(lexicalGlobalObject, stackTrace.at(i).sourceURL());
         if (JSCStackFrame::SourcePositions* sourcePositions = stackTrace.at(i).getSourcePositions()) {
-            remappedFrames[i].position.line = sourcePositions->line.oneBasedInt();
-            remappedFrames[i].position.column_start = sourcePositions->startColumn.oneBasedInt() + 1;
+            remappedFrames[i].position.line = sourcePositions->line.zeroBasedInt();
+            remappedFrames[i].position.column_start = sourcePositions->startColumn.oneBasedInt();
         } else {
             remappedFrames[i].position.line = -1;
             remappedFrames[i].position.column_start = -1;
