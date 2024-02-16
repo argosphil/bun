@@ -44,7 +44,7 @@ jobs:
             runner: ubuntu-latest
             build_machine_arch: x86_64
             assertions: "ON"
-            zig_optimize: "ReleaseSafe"
+            zig_optimize: "Debug"
             target: "artifact-assertions"
           # - cpu: nehalem
           #   tag: linux-x64-baseline-assertions
