@@ -948,7 +948,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_definitions("BUN_DEBUG=1")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(NOT WIN32)
-        target_compile_options(${bun} PUBLIC -O1 -g1
+        target_compile_options(${bun} PUBLIC -O3 -flto=full -emit-llvm -g1
             -Werror=return-type
             -Werror=return-stack-address
             -Werror=implicit-function-declaration
