@@ -157,6 +157,48 @@ RUN tar xf ${ZIG_FILENAME} \
   && mv ${ZIG_FOLDERNAME}/zig /usr/bin/zig \
   && rm -rf ${ZIG_FILENAME} ${ZIG_FOLDERNAME}
 
+FROM bun-base-with-zig as bun-compile-zig-obj
+
+ARG ZIG_PATH
+ARG TRIPLET
+ARG GIT_SHA
+ARG CPU_TARGET
+ARG CANARY=0
+ARG ASSERTIONS=OFF
+ARG ZIG_OPTIMIZE=ReleaseFast
+
+COPY *.zig package.json CMakeLists.txt ${BUN_DIR}/
+COPY completions ${BUN_DIR}/completions
+COPY packages ${BUN_DIR}/packages
+COPY src ${BUN_DIR}/src
+COPY cache/ /cache/
+
+COPY --from=bun-identifier-cache ${BUN_DIR}/src/js_lexer/*.blob ${BUN_DIR}/src/js_lexer/
+COPY --from=bun-node-fallbacks ${BUN_DIR}/src/node-fallbacks/out ${BUN_DIR}/src/node-fallbacks/out
+COPY --from=bun-codegen-for-zig ${BUN_DIR}/src/*.out.js ${BUN_DIR}/src/*.out.refresh.js ${BUN_DIR}/src/
+COPY --from=bun-codegen-for-zig ${BUN_DIR}/packages/bun-error/dist ${BUN_DIR}/packages/bun-error/dist
+
+WORKDIR $BUN_DIR
+
+ENV CCACHE_DIR=/cache/ccache
+
+RUN  mkdir -p build \
+  && bun run $BUN_DIR/src/codegen/bundle-modules-fast.ts $BUN_DIR/build \
+  && cd build \
+  && cmake .. \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DZIG_OPTIMIZE="${ZIG_OPTIMIZE}" \
+  -DCPU_TARGET="${CPU_TARGET}" \
+  -DZIG_TARGET="${TRIPLET}" \
+  -DWEBKIT_DIR="omit" \
+  -DNO_CONFIGURE_DEPENDS=1 \
+  -DNO_CODEGEN=1 \
+  -DBUN_ZIG_OBJ="/tmp/bun-zig.o" \
+  -DCANARY="${CANARY}" \
+  -DZIG_COMPILER=system \
+  && ONLY_ZIG=1 ninja "/tmp/bun-zig.o" -v
+
 FROM bun-base as c-ares
 
 ARG BUN_DIR
@@ -431,48 +473,6 @@ ENV CCACHE_DIR=/cache/ccache
 RUN bun install --frozen-lockfile \
   && make runtime_js fallback_decoder bun_error \
   && rm -rf src/runtime src/fallback.ts node_modules bun.lockb package.json Makefile
-
-FROM bun-base-with-zig as bun-compile-zig-obj
-
-ARG ZIG_PATH
-ARG TRIPLET
-ARG GIT_SHA
-ARG CPU_TARGET
-ARG CANARY=0
-ARG ASSERTIONS=OFF
-ARG ZIG_OPTIMIZE=ReleaseFast
-
-COPY *.zig package.json CMakeLists.txt ${BUN_DIR}/
-COPY completions ${BUN_DIR}/completions
-COPY packages ${BUN_DIR}/packages
-COPY src ${BUN_DIR}/src
-COPY cache/ /cache/
-
-COPY --from=bun-identifier-cache ${BUN_DIR}/src/js_lexer/*.blob ${BUN_DIR}/src/js_lexer/
-COPY --from=bun-node-fallbacks ${BUN_DIR}/src/node-fallbacks/out ${BUN_DIR}/src/node-fallbacks/out
-COPY --from=bun-codegen-for-zig ${BUN_DIR}/src/*.out.js ${BUN_DIR}/src/*.out.refresh.js ${BUN_DIR}/src/
-COPY --from=bun-codegen-for-zig ${BUN_DIR}/packages/bun-error/dist ${BUN_DIR}/packages/bun-error/dist
-
-WORKDIR $BUN_DIR
-
-ENV CCACHE_DIR=/cache/ccache
-
-RUN  mkdir -p build \
-  && bun run $BUN_DIR/src/codegen/bundle-modules-fast.ts $BUN_DIR/build \
-  && cd build \
-  && cmake .. \
-  -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DZIG_OPTIMIZE="${ZIG_OPTIMIZE}" \
-  -DCPU_TARGET="${CPU_TARGET}" \
-  -DZIG_TARGET="${TRIPLET}" \
-  -DWEBKIT_DIR="omit" \
-  -DNO_CONFIGURE_DEPENDS=1 \
-  -DNO_CODEGEN=1 \
-  -DBUN_ZIG_OBJ="/tmp/bun-zig.o" \
-  -DCANARY="${CANARY}" \
-  -DZIG_COMPILER=system \
-  && ONLY_ZIG=1 ninja "/tmp/bun-zig.o" -v
 
 FROM scratch as build_release_obj
 
