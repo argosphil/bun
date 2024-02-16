@@ -87,7 +87,7 @@ jobs:
         run: |
           sudo apt-get install ccache
           mkdir -p /tmp/cache/ccache
-          cp -av /tmp/cache cache
+          cp -a /tmp/cache cache
       - uses: docker/setup-buildx-action@v2
         id: buildx
         with:
