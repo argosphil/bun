@@ -157,6 +157,25 @@ RUN tar xf ${ZIG_FILENAME} \
   && mv ${ZIG_FOLDERNAME}/zig /usr/bin/zig \
   && rm -rf ${ZIG_FILENAME} ${ZIG_FOLDERNAME}
 
+FROM bun-base-with-zig as bun-identifier-cache
+
+ARG DEBIAN_FRONTEND
+ARG GITHUB_WORKSPACE
+ARG CPU_TARGET
+ARG BUN_DIR
+ENV CPU_TARGET=${CPU_TARGET}
+
+WORKDIR $BUN_DIR
+
+COPY src/js_lexer/identifier_data.zig ${BUN_DIR}/src/js_lexer/identifier_data.zig
+COPY src/js_lexer/identifier_cache.zig ${BUN_DIR}/src/js_lexer/identifier_cache.zig
+
+ENV CCACHE_DIR=/cache/ccache
+
+RUN cd $BUN_DIR \
+  && zig run src/js_lexer/identifier_data.zig \
+  && rm -rf zig-cache
+
 FROM bun-base-with-zig as bun-compile-zig-obj
 
 ARG ZIG_PATH
@@ -384,25 +403,6 @@ WORKDIR $BUN_DIR
 ENV CCACHE_DIR=/cache/ccache
 
 RUN cd $BUN_DIR && make lshpack
-
-FROM bun-base-with-zig as bun-identifier-cache
-
-ARG DEBIAN_FRONTEND
-ARG GITHUB_WORKSPACE
-ARG CPU_TARGET
-ARG BUN_DIR
-ENV CPU_TARGET=${CPU_TARGET}
-
-WORKDIR $BUN_DIR
-
-COPY src/js_lexer/identifier_data.zig ${BUN_DIR}/src/js_lexer/identifier_data.zig
-COPY src/js_lexer/identifier_cache.zig ${BUN_DIR}/src/js_lexer/identifier_cache.zig
-
-ENV CCACHE_DIR=/cache/ccache
-
-RUN cd $BUN_DIR \
-  && zig run src/js_lexer/identifier_data.zig \
-  && rm -rf zig-cache
 
 FROM bun-base as bun-node-fallbacks
 
