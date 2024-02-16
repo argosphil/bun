@@ -63,10 +63,6 @@ ENV SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}
 ENV AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
 ENV AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
 
-ENV CCACHE_DIR=/cache/ccache
-
-COPY cache /cache
-
 RUN apt-get update -y \
   && install_packages \
   ca-certificates \
@@ -128,18 +124,13 @@ RUN apt-get update -y \
   && mv bun-linux-${variant}/bun /usr/bin/bun \
   && ln -s /usr/bin/bun /usr/bin/bunx \
   && rm -rf bun-linux-${variant} bun-linux-${variant}.zip \
-  && mkdir -p ${BUN_DIR} ${BUN_DEPS_OUT_DIR} \
-  && (ccache -d /cache/ccache/ -s || true)
+  && mkdir -p ${BUN_DIR} ${BUN_DEPS_OUT_DIR}
 # && if [ -n "${SCCACHE_BUCKET}" ]; then \
 #   echo "Setting up sccache" \
 #   && wget https://github.com/mozilla/sccache/releases/download/v0.5.4/sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz \
 #   && tar xf sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz \
 #   && mv sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
 #   && rm -rf sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl \
-
-ENV CCACHE_DIR=/cache/ccache
-
-RUN  ccache -s
 
 FROM bun-base as bun-base-with-zig
 
@@ -184,8 +175,6 @@ WORKDIR $BUN_DIR
 
 COPY src/node-fallbacks ${BUN_DIR}/src/node-fallbacks
 
-ENV CCACHE_DIR=/cache/ccache
-
 RUN  cd $BUN_DIR/src/node-fallbacks \
   && bun install --frozen-lockfile \
   && bun run build \
@@ -201,8 +190,6 @@ COPY src/fallback.ts ${BUN_DIR}/src/fallback.ts
 COPY src/api ${BUN_DIR}/src/api
 
 WORKDIR $BUN_DIR
-
-ENV CCACHE_DIR=/cache/ccache
 
 # TODO: move away from Makefile entirely
 RUN bun install --frozen-lockfile \
@@ -260,11 +247,9 @@ ENV CCACHE_DIR=/cache/ccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/c-ares ${BUN_DIR}/src/deps/c-ares
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
-
-ENV CCACHE_DIR=/cache/ccache
 
 RUN cd $BUN_DIR && make c-ares && rm -rf ${BUN_DIR}/src/deps/c-ares ${BUN_DIR}/Makefile
 
@@ -278,7 +263,7 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/lol-html ${BUN_DIR}/src/deps/lol-html
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 ENV CCACHE_DIR=/cache/ccache
 
@@ -294,7 +279,7 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/mimalloc ${BUN_DIR}/src/deps/mimalloc
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 ENV CCACHE_DIR=/cache/ccache
 
@@ -326,7 +311,7 @@ ENV CCACHE_DIR=/cache/ccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/zlib ${BUN_DIR}/src/deps/zlib
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
 
@@ -346,7 +331,7 @@ RUN install_packages autoconf automake libtool pkg-config
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/libarchive ${BUN_DIR}/src/deps/libarchive
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
 
@@ -374,7 +359,7 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/boringssl ${BUN_DIR}/src/deps/boringssl
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
 
@@ -390,7 +375,7 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/base64 ${BUN_DIR}/src/deps/base64
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
 
@@ -410,7 +395,7 @@ ENV CCACHE_DIR=/cache/ccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/zstd ${BUN_DIR}/src/deps/zstd
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
 
@@ -429,7 +414,7 @@ ENV CCACHE_DIR=/cache/ccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/ls-hpack ${BUN_DIR}/src/deps/ls-hpack
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 WORKDIR $BUN_DIR
 
@@ -464,7 +449,7 @@ COPY packages ${BUN_DIR}/packages
 COPY src ${BUN_DIR}/src
 COPY CMakeLists.txt ${BUN_DIR}/CMakeLists.txt
 COPY src/deps/boringssl/include ${BUN_DIR}/src/deps/boringssl/include
-COPY cache/ /cache/
+COPY cache/ccache /cache/ccache
 
 ENV CCACHE_DIR=/cache/ccache
 
