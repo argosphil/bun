@@ -176,6 +176,39 @@ RUN cd $BUN_DIR \
   && zig run src/js_lexer/identifier_data.zig \
   && rm -rf zig-cache
 
+FROM bun-base as bun-node-fallbacks
+
+ARG BUN_DIR
+
+WORKDIR $BUN_DIR
+
+COPY src/node-fallbacks ${BUN_DIR}/src/node-fallbacks
+
+ENV CCACHE_DIR=/cache/ccache
+
+RUN  cd $BUN_DIR/src/node-fallbacks \
+  && bun install --frozen-lockfile \
+  && bun run build \
+  && rm -rf src/node-fallbacks/node_modules
+
+FROM bun-base-with-zig as bun-codegen-for-zig
+
+COPY package.json bun.lockb Makefile .gitmodules ${BUN_DIR}/
+COPY src/runtime ${BUN_DIR}/src/runtime
+COPY src/runtime.js src/runtime.bun.js ${BUN_DIR}/src/
+COPY packages/bun-error ${BUN_DIR}/packages/bun-error
+COPY src/fallback.ts ${BUN_DIR}/src/fallback.ts
+COPY src/api ${BUN_DIR}/src/api
+
+WORKDIR $BUN_DIR
+
+ENV CCACHE_DIR=/cache/ccache
+
+# TODO: move away from Makefile entirely
+RUN bun install --frozen-lockfile \
+  && make runtime_js fallback_decoder bun_error \
+  && rm -rf src/runtime src/fallback.ts node_modules bun.lockb package.json Makefile
+
 FROM bun-base-with-zig as bun-compile-zig-obj
 
 ARG ZIG_PATH
@@ -404,21 +437,6 @@ ENV CCACHE_DIR=/cache/ccache
 
 RUN cd $BUN_DIR && make lshpack
 
-FROM bun-base as bun-node-fallbacks
-
-ARG BUN_DIR
-
-WORKDIR $BUN_DIR
-
-COPY src/node-fallbacks ${BUN_DIR}/src/node-fallbacks
-
-ENV CCACHE_DIR=/cache/ccache
-
-RUN  cd $BUN_DIR/src/node-fallbacks \
-  && bun install --frozen-lockfile \
-  && bun run build \
-  && rm -rf src/node-fallbacks/node_modules
-
 FROM bun-base as bun-webkit
 
 ARG BUILDARCH
@@ -455,24 +473,6 @@ RUN  mkdir ${BUN_DIR}/build \
   && mkdir -p tmp_modules tmp_functions js codegen \
   && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DUSE_DEBUG_JSC=${ASSERTIONS} -DBUN_CPP_ONLY=1 -DWEBKIT_DIR=/build/bun/bun-webkit -DCANARY=${CANARY} -DZIG_COMPILER=system \
   && bash compile-cpp-only.sh -v
-
-FROM bun-base-with-zig as bun-codegen-for-zig
-
-COPY package.json bun.lockb Makefile .gitmodules ${BUN_DIR}/
-COPY src/runtime ${BUN_DIR}/src/runtime
-COPY src/runtime.js src/runtime.bun.js ${BUN_DIR}/src/
-COPY packages/bun-error ${BUN_DIR}/packages/bun-error
-COPY src/fallback.ts ${BUN_DIR}/src/fallback.ts
-COPY src/api ${BUN_DIR}/src/api
-
-WORKDIR $BUN_DIR
-
-ENV CCACHE_DIR=/cache/ccache
-
-# TODO: move away from Makefile entirely
-RUN bun install --frozen-lockfile \
-  && make runtime_js fallback_decoder bun_error \
-  && rm -rf src/runtime src/fallback.ts node_modules bun.lockb package.json Makefile
 
 FROM scratch as build_release_obj
 
