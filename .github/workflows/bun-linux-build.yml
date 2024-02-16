@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - everything
+      - everything-sccache
       - bisect
   schedule:
     - cron: '0 0 * * *'
@@ -86,7 +87,7 @@ jobs:
       - name: install ccache
         run: |
           sudo apt-get install ccache
-          mkdir -p /tmp/cache/ccache
+          mkdir -p /tmp/cache/ccache /tmp/cache/sccache
           cp -a /tmp/cache cache
       - uses: docker/setup-buildx-action@v2
         id: buildx
@@ -104,6 +105,7 @@ jobs:
       - run: |
           mkdir -p /tmp/.buildx-cache-${{matrix.tag}}
           mkdir -p /tmp/cache/ccache
+          mkdir -p /tmp/cache/sccache
       - name: Build and push
         uses: docker/build-push-action@v3
         with:

@@ -51,8 +51,8 @@ ENV CPU_TARGET=${CPU_TARGET}
 ENV BUILDARCH=${BUILDARCH}
 ENV BUN_DEPS_OUT_DIR=${BUN_DEPS_OUT_DIR}
 
-ENV CXX="ccache clang++-16"
-ENV CC="ccache clang-16"
+ENV CXX="sccache clang++-16"
+ENV CC="sccache clang-16"
 ENV AR=/usr/bin/llvm-ar-16
 ENV LD=lld-16
 
@@ -124,13 +124,12 @@ RUN apt-get update -y \
   && mv bun-linux-${variant}/bun /usr/bin/bun \
   && ln -s /usr/bin/bun /usr/bin/bunx \
   && rm -rf bun-linux-${variant} bun-linux-${variant}.zip \
-  && mkdir -p ${BUN_DIR} ${BUN_DEPS_OUT_DIR}
-# && if [ -n "${SCCACHE_BUCKET}" ]; then \
-#   echo "Setting up sccache" \
-#   && wget https://github.com/mozilla/sccache/releases/download/v0.5.4/sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz \
-#   && tar xf sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz \
-#   && mv sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-#   && rm -rf sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl \
+  && mkdir -p ${BUN_DIR} ${BUN_DEPS_OUT_DIR} \
+  && echo "Setting up sccache" \
+  && wget https://github.com/mozilla/sccache/releases/download/v0.5.4/sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz \
+  && tar xf sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz \
+  && mv sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+  && rm -rf sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl.tar.gz sccache-v0.5.4-${BUILD_MACHINE_ARCH}-unknown-linux-musl
 
 FROM bun-base as bun-base-with-zig
 
@@ -161,7 +160,7 @@ WORKDIR $BUN_DIR
 COPY src/js_lexer/identifier_data.zig ${BUN_DIR}/src/js_lexer/identifier_data.zig
 COPY src/js_lexer/identifier_cache.zig ${BUN_DIR}/src/js_lexer/identifier_cache.zig
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd $BUN_DIR \
   && zig run src/js_lexer/identifier_data.zig \
@@ -219,7 +218,7 @@ COPY --from=bun-codegen-for-zig ${BUN_DIR}/packages/bun-error/dist ${BUN_DIR}/pa
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN  mkdir -p build \
   && bun run $BUN_DIR/src/codegen/bundle-modules-fast.ts $BUN_DIR/build \
@@ -243,11 +242,11 @@ FROM bun-base as c-ares
 ARG BUN_DIR
 ARG CPU_TARGET
 ENV CPU_TARGET=${CPU_TARGET}
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/c-ares ${BUN_DIR}/src/deps/c-ares
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
@@ -263,9 +262,9 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/lol-html ${BUN_DIR}/src/deps/lol-html
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN export PATH=$PATH:$HOME/.cargo/bin && cd ${BUN_DIR} && \
   make lolhtml && rm -rf src/deps/lol-html Makefile
@@ -279,9 +278,9 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/mimalloc ${BUN_DIR}/src/deps/mimalloc
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd ${BUN_DIR} && \
   make mimalloc && rm -rf src/deps/mimalloc Makefile;
@@ -297,7 +296,7 @@ COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/mimalloc ${BUN_DIR}/src/deps/mimalloc
 COPY cache/ /cache/
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd ${BUN_DIR} && \ 
   make mimalloc-debug && rm -rf src/deps/mimalloc Makefile;
@@ -307,15 +306,15 @@ FROM bun-base as zlib
 ARG BUN_DIR
 ARG CPU_TARGET
 ENV CPU_TARGET=${CPU_TARGET}
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/zlib ${BUN_DIR}/src/deps/zlib
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd $BUN_DIR && \
   make zlib && rm -rf src/deps/zlib Makefile
@@ -325,17 +324,17 @@ FROM bun-base as libarchive
 ARG BUN_DIR
 ARG CPU_TARGET
 ENV CPU_TARGET=${CPU_TARGET}
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN install_packages autoconf automake libtool pkg-config 
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/libarchive ${BUN_DIR}/src/deps/libarchive
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd $BUN_DIR && \
   make libarchive && rm -rf src/deps/libarchive Makefile
@@ -359,11 +358,11 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/boringssl ${BUN_DIR}/src/deps/boringssl
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd ${BUN_DIR} && make boringssl && rm -rf src/deps/boringssl Makefile
 
@@ -375,11 +374,11 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/base64 ${BUN_DIR}/src/deps/base64
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd $BUN_DIR && \
   make base64 && rm -rf src/deps/base64 Makefile
@@ -391,15 +390,15 @@ ARG BUN_DIR
 ARG CPU_TARGET
 ENV CPU_TARGET=${CPU_TARGET}
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/zstd ${BUN_DIR}/src/deps/zstd
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd $BUN_DIR && make zstd
 
@@ -410,15 +409,15 @@ ARG BUN_DIR
 ARG CPU_TARGET
 ENV CPU_TARGET=${CPU_TARGET}
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 COPY Makefile ${BUN_DIR}/Makefile
 COPY src/deps/ls-hpack ${BUN_DIR}/src/deps/ls-hpack
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cd $BUN_DIR && make lshpack
 
@@ -429,7 +428,7 @@ ARG ASSERTIONS
 
 COPY CMakeLists.txt ${BUN_DIR}/CMakeLists.txt
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN mkdir ${BUN_DIR}/bun-webkit \
   && WEBKIT_TAG=$(grep 'set(WEBKIT_TAG' "${BUN_DIR}/CMakeLists.txt" | awk '{print $2}' | cut -f 1 -d ')') \
@@ -449,9 +448,9 @@ COPY packages ${BUN_DIR}/packages
 COPY src ${BUN_DIR}/src
 COPY CMakeLists.txt ${BUN_DIR}/CMakeLists.txt
 COPY src/deps/boringssl/include ${BUN_DIR}/src/deps/boringssl/include
-COPY cache/ccache /cache/ccache
+COPY cache/sccache /cache/sccache
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN  mkdir ${BUN_DIR}/build \
   && cd ${BUN_DIR}/build \
@@ -469,7 +468,7 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN mkdir -p build bun-webkit
 
@@ -495,7 +494,7 @@ COPY --from=bun-compile-zig-obj /tmp/bun-zig.o ${BUN_DIR}/build/bun-zig.o
 
 WORKDIR $BUN_DIR/build
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN cmake .. \
   -G Ninja \
@@ -530,7 +529,7 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 WORKDIR $BUN_DIR
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN  mkdir -p build bun-webkit
 
@@ -569,7 +568,7 @@ COPY --from=bun-compile-zig-obj /cache/ /cache/
 
 WORKDIR $BUN_DIR/build
 
-ENV CCACHE_DIR=/cache/ccache
+ENV SCCACHE_DIR=/cache/sccache
 
 RUN  cmake .. \
   -G Ninja \
@@ -590,10 +589,6 @@ RUN  cmake .. \
   && mv bun bun-profile /build/out \
   && tar -C / -cf /build/out/cache.tar cache \
   && rm -rf ${BUN_DIR} ${BUN_DEPS_OUT_DIR}
-
-ENV CCACHE_DIR=/cache/ccache
-
-RUN  ccache -s
 
 FROM scratch as artifact-assertions
 
