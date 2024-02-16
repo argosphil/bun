@@ -152,18 +152,6 @@ jobs:
         with:
           name: bun-${{matrix.tag}}
           path: ${{runner.temp}}/release/bun-${{matrix.tag}}.zip
-      - uses: actions/upload-artifact@v3
-        with:
-          name: bun-obj-${{matrix.tag}}
-          path: ${{runner.temp}}/release/bun-obj
-      - uses: actions/upload-artifact@v3
-        with:
-          name: ${{matrix.tag}}-dependencies
-          path: ${{runner.temp}}/release/bun-dependencies
-      - uses: actions/upload-artifact@v3
-        with:
-          name: ${{matrix.tag}}-cache
-          path: ${{runner.temp}}/release/cache.tar
 #       - name: Release
 #         id: release
 #         uses: ncipollo/release-action@v1
