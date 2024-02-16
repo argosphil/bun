@@ -1095,22 +1095,6 @@ if(APPLE)
     target_link_libraries(${bun} PRIVATE "${ICU4C_DIR}/lib/libicuuc.a")
 endif()
 
-# --- Stripped Binary "bun"
-if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT WIN32 AND NOT ASSERT_ENABLED)
-    # add_custom_command(
-    # TARGET ${bun}
-    # POST_BUILD
-    # COMMAND ${DSYMUTIL} -o ${BUN_WORKDIR}/bun.dSYM ${BUN_WORKDIR}/${bun}
-    # COMMENT "Stripping Symbols"
-    # )
-    add_custom_command(
-        TARGET ${bun}
-        POST_BUILD
-        COMMAND ${STRIP} -s -x -S -o ${BUN_WORKDIR}/bun ${BUN_WORKDIR}/${bun}
-        COMMENT "Stripping Symbols"
-    )
-endif()
-
 if(WIN32)
     # Kill all instances of bun before linking.
     # This is necessary because the file is locked by the process.
