@@ -128,7 +128,7 @@ jobs:
       - id: cache-shuffle
         name: shuffle around the cache data
         run: |
-          cd /tmp && sudo tar xf ${{runner.temp}}/release/cache.tar
+          cd /tmp && sudo tar --exclude=cache/zig-global --exclude=cache/zig -xf ${{runner.temp}}/release/cache.tar
       - name: Zip
         run: |
           # if zip is not found

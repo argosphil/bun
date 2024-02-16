@@ -782,13 +782,6 @@ if(NOT CI)
     set(USES_TERMINAL_NOT_IN_CI "USES_TERMINAL")
 endif()
 
-if(NOT CI)
-     error("cannot build right now, need to set cache-dir conditionally")
-else()
-     set(ZIG_CACHE_DIR "/cache/zig")
-     set(ZIG_GLOBAL_CACHE_DIR "/cache/zig-global")
-endif()
-
 if(NOT BUN_LINK_ONLY AND NOT BUN_CPP_ONLY)
     add_custom_command(
         OUTPUT "${BUN_ZIG_OBJ}"
@@ -801,8 +794,6 @@ if(NOT BUN_LINK_ONLY AND NOT BUN_CPP_ONLY)
         "-Doptimize=${ZIG_OPTIMIZE}"
         "-Dcpu=${CPU_TARGET}"
         "-Dtarget=${ZIG_TARGET}"
-	"--cache-dir" "${ZIG_CACHE_DIR}"
-	"--global-cache-dir" "${ZIG_GLOBAL_CACHE_DIR}"
         DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/build.zig"
         "${ZIG_FILES}"
