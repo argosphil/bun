@@ -474,13 +474,6 @@ RUN  mkdir ${BUN_DIR}/build \
   && cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DUSE_DEBUG_JSC=${ASSERTIONS} -DBUN_CPP_ONLY=1 -DWEBKIT_DIR=/build/bun/bun-webkit -DCANARY=${CANARY} -DZIG_COMPILER=system \
   && bash compile-cpp-only.sh -v
 
-FROM scratch as build_release_obj
-
-ARG CPU_TARGET
-ENV CPU_TARGET=${CPU_TARGET}
-
-COPY --from=bun-compile-zig-obj /tmp/bun-zig.o /
-
 FROM bun-base as bun-link
 
 ARG CPU_TARGET
