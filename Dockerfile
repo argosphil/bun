@@ -589,7 +589,7 @@ RUN  cmake .. \
   && mkdir -p /build/out \
   && mv bun bun-profile /build/out \
   && rm -rf ${BUN_DIR} ${BUN_DEPS_OUT_DIR} \
-  && tar cf /build/out/cache.tar cache
+  && (cd $BUN_DIR; tar cf /build/out/cache.tar cache)
 
 ENV CCACHE_DIR=/cache/ccache
 
