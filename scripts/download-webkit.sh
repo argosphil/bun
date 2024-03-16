@@ -18,7 +18,8 @@ if [ -z "$PKG" ]; then
   exit 1
 fi
 
-url="https://github.com/oven-sh/WebKit/releases/download/autobuild-$TAG/$PKG.tar.gz"
+
+url="https://github.com/argosphil/WebKit/releases/download/autobuild-$TAG/$PKG.tar.gz"
 
 old_tar_dir="$(dirname "$0")/../.webkit-cache"
 tar_dir="$(dirname "$0")/../.cache"
