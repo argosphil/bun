@@ -75,6 +75,7 @@ jobs:
       target: "artifact"
       cmake_build_type: "Valgrind"
       runner: ubuntu-latest
+      skip_ccache: true
   test-linux-x64-valgrind:
     needs: linux-x64-valgrind
     uses: ./.github/workflows/test.yml
