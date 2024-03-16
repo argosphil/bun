@@ -790,8 +790,11 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
                 us_socket_context_on_end(ssl_int, ctx, SocketHandler.on_end);
             if (comptime @hasDecl(Type, "onHandshake") and @typeInfo(@TypeOf(Type.onHandshake)) != .Null)
                 us_socket_context_on_handshake(ssl_int, ctx, SocketHandler.on_handshake, null);
-            if (comptime @hasDecl(Type, "onLongTimeout") and @typeInfo(@TypeOf(Type.onLongTimeout)) != .Null)
+            if (comptime @hasDecl(Type, "onLongTimeout") and @typeInfo(@TypeOf(Type.onLongTimeout)) != .Null) {
                 us_socket_context_on_long_timeout(ssl_int, ctx, SocketHandler.on_long_timeout);
+            } else if (comptime @hasDecl(Type, "onTimeout") and @typeInfo(@TypeOf(Type.onTimeout)) != .Null) {
+                @compileError("no long timeout handler");
+            }
         }
 
         pub fn from(socket: *Socket) ThisSocket {
