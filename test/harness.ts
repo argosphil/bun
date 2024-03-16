@@ -15,7 +15,7 @@ export const bunEnv: NodeJS.ProcessEnv = {
   GITHUB_ACTIONS: "false",
   BUN_DEBUG_QUIET_LOGS: "1",
   NO_COLOR: "1",
-  FORCE_COLOR: undefined,
+  FORCE_COLOR: "0",
   TZ: "Etc/UTC",
   CI: "1",
   BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
