@@ -3131,6 +3131,7 @@ pub fn toResult(this: *HTTPClient) HTTPClientResult {
         .has_more = certificate_info != null or (this.state.fail == null and !this.state.isDone()),
         .body_size = body_size,
         .certificate_info = certificate_info,
+        .redirected = this.remaining_redirect_count != default_redirect_count,
     };
 }
 
