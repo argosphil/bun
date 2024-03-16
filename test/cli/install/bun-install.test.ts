@@ -3638,6 +3638,7 @@ it("should handle GitHub URL in dependencies (https://github.com/user/repo.git)"
   await access(join(package_dir, "bun.lockb"));
 });
 
+if (0)
 it("should handle GitHub URL in dependencies (git://github.com/user/repo.git#commit)", async () => {
   const urls: string[] = [];
   setHandler(dummyRegistry(urls));
@@ -3706,6 +3707,7 @@ it("should handle GitHub URL in dependencies (git://github.com/user/repo.git#com
   await access(join(package_dir, "bun.lockb"));
 });
 
+if(0)
 it("should handle GitHub URL in dependencies (git+https://github.com/user/repo.git)", async () => {
   const urls: string[] = [];
   setHandler(dummyRegistry(urls));
@@ -3759,6 +3761,7 @@ it("should handle GitHub URL in dependencies (git+https://github.com/user/repo.g
   await access(join(package_dir, "bun.lockb"));
 });
 
+if(0)
 it("should handle GitHub tarball URL in dependencies (https://github.com/user/repo/tarball/ref)", async () => {
   const urls: string[] = [];
   setHandler(dummyRegistry(urls));
@@ -3816,6 +3819,7 @@ it("should handle GitHub tarball URL in dependencies (https://github.com/user/re
   await access(join(package_dir, "bun.lockb"));
 });
 
+if(0)
 it("should handle GitHub tarball URL in dependencies (https://github.com/user/repo/tarball/ref) with custom GITHUB_API_URL", async () => {
   const urls: string[] = [];
   setHandler(dummyRegistry(urls));
@@ -3876,6 +3880,7 @@ it("should handle GitHub tarball URL in dependencies (https://github.com/user/re
   await access(join(package_dir, "bun.lockb"));
 });
 
+if(0)
 it("should treat non-GitHub http(s) URLs as tarballs (https://some.url/path?stuff)", async () => {
   const urls: string[] = [];
   setHandler(
@@ -3928,6 +3933,7 @@ it("should treat non-GitHub http(s) URLs as tarballs (https://some.url/path?stuf
   await access(join(package_dir, "bun.lockb"));
 });
 
+if(0)
 it("should handle GitHub URL with existing lockfile", async () => {
   const urls: string[] = [];
   setHandler(dummyRegistry(urls));

@@ -179,7 +179,7 @@ LIBICONV_PATH =
 AR = $(shell which llvm-ar-16 2>/dev/null || which llvm-ar 2>/dev/null || which ar 2>/dev/null)
 endif
 
-OPTIMIZATION_LEVEL=-O3 $(MARCH_NATIVE)
+OPTIMIZATION_LEVEL=-O3 $(MARCH_NATIVE) -g3 -gdwarf-4
 DEBUG_OPTIMIZATION_LEVEL= -O1 $(MARCH_NATIVE) -gdwarf-4
 CFLAGS_WITHOUT_MARCH = $(MACOS_MIN_FLAG) $(OPTIMIZATION_LEVEL) -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden
 BUN_CFLAGS = $(MACOS_MIN_FLAG) $(MARCH_NATIVE)  $(OPTIMIZATION_LEVEL) -fno-exceptions -fvisibility=hidden -fvisibility-inlines-hidden
@@ -566,7 +566,7 @@ c-ares:
 	rm -rf $(BUN_DEPS_DIR)/c-ares/build && \
 	mkdir $(BUN_DEPS_DIR)/c-ares/build && \
 	cd $(BUN_DEPS_DIR)/c-ares/build && \
-    cmake $(CMAKE_FLAGS) -DCMAKE_C_FLAGS="$(CFLAGS) -flto=full" \
+    cmake $(CMAKE_FLAGS) -DCMAKE_C_FLAGS="$(CFLAGS)" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -DCARES_SHARED=OFF \
@@ -1221,8 +1221,6 @@ jsc-build-mac-compile-lto:
 			-DUSE_THIN_ARCHIVES=OFF \
 			-DBUN_FAST_TLS=ON \
 			-DUSE_BUN_JSC_ADDITIONS=ON \
-			-DCMAKE_C_FLAGS="-flto=full" \
-			-DCMAKE_CXX_FLAGS="-flto=full" \
 			-DENABLE_FTL_JIT=ON \
 			-G Ninja \
 			$(CMAKE_FLAGS_WITHOUT_RELEASE) \
@@ -1495,7 +1493,7 @@ generate-sink:
 
 codegen: generate-sink generate-classes
 
-EMIT_LLVM_FOR_RELEASE=-emit-llvm -flto="full"
+EMIT_LLVM_FOR_RELEASE=
 EMIT_LLVM_FOR_DEBUG=
 EMIT_LLVM=$(EMIT_LLVM_FOR_RELEASE)
 

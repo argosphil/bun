@@ -241,15 +241,18 @@ const filesToProcess = readdirSync(SRC_DIR)
 const files: Array<{ basename: string; functions: BundledBuiltin[]; internal: boolean }> = [];
 async function processFile(x: string) {
   const basename = path.basename(x, ".ts");
-  try {
-    files.push({
-      basename,
-      ...(await processFileSplit(path.join(SRC_DIR, x))),
-    });
-  } catch (error) {
-    console.error("Failed to process file: " + basename + ".ts");
-    console.error(error);
-    process.exit(1);
+  while (true) {
+    try {
+      files.push({
+        basename,
+        ...(await processFileSplit(path.join(SRC_DIR, x))),
+      });
+    } catch (error) {
+      console.error("Failed to process file: " + basename + ".ts");
+      console.error(error);
+      continue;
+    }
+    break;
   }
 }
 

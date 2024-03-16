@@ -107,6 +107,7 @@ RUN apt-get update -y \
   ruby \
   golang \
   nodejs \
+  ccache \
   && ln -s /usr/bin/clang-${LLVM_VERSION} /usr/bin/clang \
   && ln -s /usr/bin/clang++-${LLVM_VERSION} /usr/bin/clang++ \
   && ln -s /usr/bin/lld-${LLVM_VERSION} /usr/bin/lld \
@@ -467,7 +468,9 @@ ENV CPU_TARGET=${CPU_TARGET}
 
 WORKDIR $BUN_DIR
 
-RUN mkdir -p build bun-webkit
+ENV CCACHE_DIR=/cache/ccache
+
+RUN  mkdir -p build bun-webkit
 
 # lol
 COPY src/bun.js/bindings/sqlite/sqlite3.c ${BUN_DIR}/src/bun.js/bindings/sqlite/sqlite3.c
