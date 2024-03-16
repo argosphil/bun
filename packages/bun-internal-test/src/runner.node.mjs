@@ -379,6 +379,7 @@ try {
     }
 } catch (e) {
 }
+{
     queue = queue.sort((a,b) => {
        a = a.replace(cwd, "").slice(1);
        b = b.replace(cwd, "").slice(1);
