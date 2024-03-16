@@ -789,6 +789,7 @@ pub const Request = struct {
             .url = if (preserve_url) original_url else this.url.dupeRef(),
             .method = this.method,
             .headers = this.cloneHeaders(globalThis),
+            .reported_estimated_size = this.reported_estimated_size,
         };
 
         if (this.signal) |signal| {
