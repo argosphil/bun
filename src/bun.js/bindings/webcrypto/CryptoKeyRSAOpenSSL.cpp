@@ -146,12 +146,28 @@ RefPtr<CryptoKeyRSA> CryptoKeyRSA::create(CryptoAlgorithmIdentifier identifier, 
     return adoptRef(new CryptoKeyRSA(identifier, hash, hasHash, keyType, WTFMove(pkey), extractable, usages));
 }
 
+static void assert_initialized(volatile char *data, size_t size)
+{
+  bool cont = false;
+  do {
+    for (size_t i = 0; i < size; i++) {
+      char a = data[i];
+      char b = data[i];
+      if (a != b)
+	cont = true;
+    }
+  } while(cont);
+}
+
+#define ASSERT_INITIALIZED(x) assert_initialized((volatile char *)(&(x)), sizeof(x))
+
 CryptoKeyRSA::CryptoKeyRSA(CryptoAlgorithmIdentifier identifier, CryptoAlgorithmIdentifier hash, bool hasHash, CryptoKeyType type, PlatformRSAKeyContainer&& platformKey, bool extractable, CryptoKeyUsageBitmap usages)
     : CryptoKey(identifier, type, extractable, usages)
     , m_platformKey(WTFMove(platformKey))
     , m_restrictedToSpecificHash(hasHash)
     , m_hash(hash)
 {
+  ASSERT_INITIALIZED(usages);
 }
 
 bool CryptoKeyRSA::isRestrictedToHash(CryptoAlgorithmIdentifier& identifier) const
