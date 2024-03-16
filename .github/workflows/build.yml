@@ -1,0 +1,138 @@
+name: bun-build
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      build_arch:
+        required: true
+        type: string
+      cpu:
+        required: true
+        type: string
+      build_machine_arch:
+        required: true
+        type: string
+      assertions:
+        required: true
+        type: string
+      zig_optimize:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      cmake_build_type:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      skip_ccache:
+        required: false
+        type: boolean
+
+jobs:
+  linux:
+    name: ${{inputs.tag}}
+    runs-on: ${{inputs.runner}}
+    timeout-minutes: 90
+    permissions: write-all
+    strategy:
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{github.sha}}
+          clean: true
+      - name: check the date
+        run: |
+          echo "T_NOW=$(date --iso=s)" >> $GITHUB_ENV
+      - if: ${{ ! inputs.skip_ccache }}
+        name: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/cache
+          key: bun-cache-${{inputs.tag}}-${{env.T_NOW}}
+          restore-keys: |
+            bun-cache-${{inputs.tag}}-
+      - if: ${{ ! inputs.skip_ccache }}
+        name: install ccache
+        run: |
+          sudo apt-get install ccache
+          mkdir -p /tmp/cache/ccache
+          cp -a /tmp/cache cache
+      - uses: docker/setup-buildx-action@v3
+        id: buildx
+        with:
+          install: true
+      - name: Run
+        run: |
+          rm -rf ${{runner.temp}}/release
+      - run: |
+          mkdir -p /tmp/.buildx-cache-${{inputs.tag}}
+          mkdir -p /tmp/cache/ccache
+          mkdir -p cache/ccache
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          build-args: |
+            ARCH=${{inputs.arch}}
+            BUILDARCH=${{inputs.build_arch}}
+            BUILD_MACHINE_ARCH=${{inputs.build_machine_arch}}
+            CPU_TARGET=${{inputs.cpu}}
+            GIT_SHA=${{github.sha}}
+            ASSERTIONS=${{inputs.assertions}}
+            ZIG_OPTIMIZE=${{inputs.zig_optimize}}
+            CMAKE_BUILD_TYPE=${{inputs.cmake_build_type}}
+            CCACHE=${{(!inputs.skip_ccache) && 'ccache' || ''}}
+          platforms: linux/${{inputs.build_arch}}
+          target: ${{inputs.target}}
+          outputs: type=local,dest=${{runner.temp}}/release
+      - id: bun-version-check
+        name: Bun version check
+        run: |
+          # If this hangs, it means something is seriously wrong with the build
+          ${{runner.temp}}/release/bun --version
+      - id: bun-timeout-check
+        name: Bun timeout check
+        run: |
+          # If this hangs, it means something is seriously wrong with the build
+          timeout 10s ${{runner.temp}}/release/bun -e 'console.log(42)'
+      - if: ${{ ! inputs.skip_ccache }}
+        id: cache-shuffle
+        name: shuffle around the cache data
+        run: |
+          cd /tmp && sudo tar -xf ${{runner.temp}}/release/cache.tar
+      - name: Zip
+        run: |
+          # if zip is not found
+          if [ ! -x "$(command -v zip)" ]; then
+            sudo apt-get update && sudo apt-get install -y zip --no-install-recommends
+          fi
+
+          if [ ! -x "$(command -v strip)" ]; then
+            sudo apt-get update && sudo apt-get install -y binutils --no-install-recommends
+          fi
+
+          cd ${{runner.temp}}/release
+          chmod +x bun
+
+          mkdir bun-${{inputs.tag}}
+
+          mv bun bun-${{inputs.tag}}/bun
+
+          zip -r bun-${{inputs.tag}}.zip bun-${{inputs.tag}}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bun-${{inputs.tag}}
+          path: ${{runner.temp}}/release/bun-${{inputs.tag}}.zip

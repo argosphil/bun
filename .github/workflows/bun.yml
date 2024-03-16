@@ -1,0 +1,91 @@
+name: bun
+
+on:
+  push:
+    branches:
+      - everything
+      - bisect
+  workflow_dispatch:
+
+jobs:
+  linux-aarch64-buildfast:
+    uses: ./.github/workflows/build.yml
+    with:
+      cpu: native
+      tag: linux-aarch64-buildfast
+      arch: aarch64
+      build_arch: arm64
+      build_machine_arch: aarch64
+      assertions: "OFF"
+      zig_optimize: "Debug"
+      target: "artifact"
+      cmake_build_type: "BuildFast"
+      runner: ubicloud-standard-2-arm
+  test-linux-aarch64-buildfast:
+    needs: linux-aarch64-buildfast
+    uses: ./.github/workflows/test.yml
+    with:
+      cpu: native
+      tag: linux-aarch64-buildfast
+      arch: aarch64
+      build_arch: arm64
+      build_machine_arch: aarch64
+      assertions: "OFF"
+      zig_optimize: "Debug"
+      target: "artifact"
+      cmake_build_type: "BuildFast"
+      runner: ubicloud-standard-2-arm
+  linux-x64-buildfast:
+    uses: ./.github/workflows/build.yml
+    with:
+      cpu: haswell
+      tag: linux-x64-buildfast
+      arch: x86_64
+      build_arch: amd64
+      build_machine_arch: x86_64
+      assertions: "OFF"
+      zig_optimize: "Debug"
+      target: "artifact"
+      cmake_build_type: "BuildFast"
+      runner: ubuntu-latest
+  test-linux-x64-buildfast:
+    needs: linux-x64-buildfast
+    uses: ./.github/workflows/test.yml
+    with:
+      cpu: haswell
+      tag: linux-x64-buildfast
+      arch: x86_64
+      build_arch: amd64
+      build_machine_arch: x86_64
+      assertions: "OFF"
+      zig_optimize: "Debug"
+      target: "artifact"
+      cmake_build_type: "BuildFast"
+      runner: ubuntu-latest
+  linux-x64-valgrind:
+    uses: ./.github/workflows/build.yml
+    with:
+      cpu: haswell
+      tag: linux-x64-valgrind
+      arch: x86_64
+      build_arch: amd64
+      build_machine_arch: x86_64
+      assertions: "OFF"
+      zig_optimize: "Debug"
+      target: "artifact"
+      cmake_build_type: "Valgrind"
+      runner: ubuntu-latest
+  test-linux-x64-valgrind:
+    needs: linux-x64-valgrind
+    uses: ./.github/workflows/test.yml
+    with:
+      cpu: haswell
+      tag: linux-x64-valgrind
+      arch: x86_64
+      build_arch: amd64
+      build_machine_arch: x86_64
+      assertions: "OFF"
+      zig_optimize: "Debug"
+      target: "artifact"
+      cmake_build_type: "Valgrind"
+      runner: ubuntu-latest

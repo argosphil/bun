@@ -1,0 +1,129 @@
+name: bun-build
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        required: true
+        type: string
+      build_arch:
+        required: true
+        type: string
+      cpu:
+        required: true
+        type: string
+      build_machine_arch:
+        required: true
+        type: string
+      assertions:
+        required: true
+        type: string
+      zig_optimize:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      cmake_build_type:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+
+jobs:
+  test:
+    name: Tests ${{inputs.tag}}
+    runs-on: ${{inputs.runner}}
+    timeout-minutes: 120
+    permissions:
+      pull-requests: write
+    outputs:
+      failing_tests: ${{ steps.test.outputs.failing_tests }}
+      failing_tests_count: ${{ steps.test.outputs.failing_tests_count }}
+    strategy:
+      fail-fast: false
+    steps:
+      - id: checkout
+        name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          clean: true
+      - id: download
+        name: Download
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-${{inputs.tag}}
+          path: ${{runner.temp}}/release
+      - id: install-bun
+        name: Install Bun
+        run: |
+          cd ${{runner.temp}}/release
+          unzip bun-${{inputs.tag}}.zip
+          cd bun-${{inputs.tag}}
+          chmod +x bun
+          pwd >> $GITHUB_PATH
+      - id: bun-version-check
+        name: Bun version check
+        run: |
+          # If this hangs, it means something is seriously wrong with the build
+          bun --version
+      - id: install-dependencies
+        name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y openssl time valgrind bzip2
+          (curl https://sourceware.org/pub/valgrind/valgrind-3.22.0.tar.bz2 | tar xj) && (cd valgrind*; sh autogen.sh; ./configure && make && sudo make install)
+          bun install --verbose
+          bun install --cwd=test --verbose
+          bun install --cwd=packages/bun-internal-test --verbose
+          bun install --cwd=test/js/third_party/prisma --verbose
+      - id: pretest
+        name: Pretest
+        run: |
+          node --version
+      - id: test2
+        name: Test (node runner)
+        run: |
+          ls -l packages/bun-internal-test/src/runner.node.mjs
+      - id: test
+        name: Test (node runner)
+        env:
+          BUN_USE_VALGRIND: ${{inputs.cmake_build_type == 'Valgrind' && '1' || ''}}
+        run: |
+          node packages/bun-internal-test/src/runner.node.mjs
+      - name: Comment on PR
+        if: steps.test.outputs.failing_tests != '' && github.event_name == 'pull_request'
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          comment_tag: test-failures-${{inputs.tag}}
+          message: |
+            ❌ @${{ github.actor }} ${{ steps.test.outputs.failing_tests_count }} files with test failures on ${{ inputs.tag }}:
+
+            ${{ steps.test.outputs.failing_tests }}
+
+            **[View test output](https://github.com/oven-sh/bun/actions/runs/${{github.run_id}})**
+
+            <sup>[#${{github.sha}}](https://github.com/oven-sh/bun/commits/${{github.sha}})</sup>
+      - name: Uncomment on PR
+        if: steps.test.outputs.failing_tests == '' && github.event_name == 'pull_request'
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          comment_tag: test-failures-${{inputs.tag}}
+          mode: upsert
+          create_if_not_exists: false
+          message: |
+            ✅ test failures on ${{ inputs.tag }} have been resolved.
+
+            <sup>[#${{github.sha}}](https://github.com/oven-sh/bun/commits/${{github.sha}})</sup>
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bun-test-metadata-${{inputs.tag}}.json
+          path: test-metadata.json
+      - id: fail
+        name: Fail the build
+        if: steps.test.outputs.failing_tests != ''
+        run: exit 1
