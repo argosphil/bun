@@ -492,17 +492,17 @@ function charLengthAt(str, i) {
                 (right_alt * 8)
   - two leading ESCs apparently mean the same as one leading ESC
 */
+var keySeq = null;
+var keyName;
+var keyCtrl = false;
+var keyMeta = false;
+var keyShift = false;
+
 function* emitKeys(stream) {
   while (true) {
     var ch = yield;
     var s = ch;
     var escaped = false;
-
-    var keySeq = null;
-    var keyName;
-    var keyCtrl = false;
-    var keyMeta = false;
-    var keyShift = false;
 
     // var key = {
     //   sequence: null,
