@@ -371,18 +371,21 @@ let queue = [...findTests(resolve(cwd, "test"))];
     });
 }
 
-{
+try {
     const metadata = JSON.parse(readFileSync("test-metadata.json", "utf-8"));
     const walltime = new Map();
     for (const {name, perftime_ms} of metadata) {
         walltime.set(name, perftime_ms);
     }
+} catch (e) {
+}
     queue = queue.sort((a,b) => {
        a = a.replace(cwd, "").slice(1);
        b = b.replace(cwd, "").slice(1);
        return (walltime.get(b) || 0) - (walltime.get(a) || 0);
     });
 }
+
 let running = 0;
 let total = queue.length;
 let finished = 0;
