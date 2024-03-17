@@ -371,9 +371,9 @@ let queue = [...findTests(resolve(cwd, "test"))];
     });
 }
 
+const walltime = new Map();
 try {
     const metadata = JSON.parse(readFileSync("test-metadata.json", "utf-8"));
-    const walltime = new Map();
     for (const {name, perftime_ms} of metadata) {
         walltime.set(name, perftime_ms);
     }
