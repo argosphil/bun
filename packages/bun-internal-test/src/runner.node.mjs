@@ -276,7 +276,11 @@ async function runTest(path) {
     }
   }
 
-  metadata.time = JSON.parse(readFileSync(tmpFile, "utf-8"));
+  try {
+    metadata.time = JSON.parse(readFileSync(tmpFile, "utf-8"));
+  } catch (e) {
+    metadata.time = {};
+  }
   rmSync(tmpFile);
   const passed = exitCode === 0 && !err && !signal;
 
