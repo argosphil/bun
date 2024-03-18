@@ -26,7 +26,7 @@ public:
     GlobalScope(ScriptExecutionContext* context)
         : EventTargetWithInlineData()
         , m_context(context),
-	, m_messageEventCount(0)
+	  m_messageEventCount(0)
     {
         this->onDidChangeListener = &onDidChangeListenerImpl;
     }

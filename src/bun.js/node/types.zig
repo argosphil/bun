@@ -4965,7 +4965,7 @@ pub const Process = struct {
 
     pub fn getCwd(globalObject: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
         var buf: bun.PathBuffer = undefined;
-	@memset(buf[0..], 0);
+        @memset(buf[0..], 0);
         return switch (Path.getCwd(&buf)) {
             .result => |r| toJSString(globalObject, r),
             .err => |e| e.toJSC(globalObject),
