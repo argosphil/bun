@@ -25,7 +25,8 @@ class GlobalScope : public RefCounted<GlobalScope>, public EventTargetWithInline
 public:
     GlobalScope(ScriptExecutionContext* context)
         : EventTargetWithInlineData()
-        , m_context(context)
+        , m_context(context),
+	, m_messageEventCount(0)
     {
         this->onDidChangeListener = &onDidChangeListenerImpl;
     }
