@@ -4619,4 +4619,17 @@ GlobalObject::PromiseFunctions GlobalObject::promiseHandlerID(EncodedJSValue (*h
 const JSC::ClassInfo GlobalObject::s_info = { "GlobalObject"_s, &Base::s_info, &bunGlobalObjectTable, nullptr,
     CREATE_METHOD_TABLE(GlobalObject) };
 
+extern "C" void valgrind_assert_initialized(volatile char *data, size_t size)
+{
+  bool cont = false;
+  do {
+    for (size_t i = 0; i < size; i++) {
+      char a = data[i];
+      char b = data[i];
+      if (a != b)
+	cont = true;
+    }
+  } while(cont);
+}
+
 } // namespace Zig
