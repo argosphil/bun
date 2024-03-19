@@ -1,15 +1,15 @@
+console.log("hello world");
+
 import * as action from "@actions/core";
 import { spawn, spawnSync } from "child_process";
 import { rmSync, writeFileSync, readFileSync, mkdirSync, openSync, close, closeSync } from "fs";
-import { readFile, rm } from "fs/promises";
+import { readFile } from "fs/promises";
 import { readdirSync } from "node:fs";
 import { resolve, basename } from "node:path";
-import { constants, cpus, hostname, tmpdir, totalmem, userInfo } from "os";
-import { join, normalize } from "path";
+import { cpus, hostname, tmpdir, totalmem, userInfo } from "os";
+import { join } from "path";
 import { fileURLToPath } from "url";
-import PQueue from "p-queue";
 
-const run_start = new Date();
 const TIMEOUT_DURATION = 1000 * 60 * 5;
 const SHORT_TIMEOUT_DURATION = Math.ceil(TIMEOUT_DURATION / 5);
 
@@ -24,7 +24,7 @@ function defaultConcurrency() {
 }
 
 const windows = process.platform === "win32";
-const KEEP_TMPDIR = process.env["BUN_KEEP_TMPDIR"] === "1";
+
 const nativeMemory = totalmem();
 const force_ram_size_input = parseInt(process.env["BUN_JSC_forceRAMSize"] || "0", 10);
 let force_ram_size = Number(BigInt(nativeMemory) >> BigInt(2)) + "";
@@ -51,24 +51,34 @@ uncygwinTempDir();
 const cwd = resolve(fileURLToPath(import.meta.url), "../../../../");
 process.chdir(cwd);
 
+console.log({cwd});
+
 const ci = !!process.env["GITHUB_ACTIONS"];
-const enableProgressBar = false;
+const enableProgressBar = !ci;
 
-const dirPrefix = "bun-test-tmp-" + ((Math.random() * 100_000_0) | 0).toString(36) + "_";
-const run_concurrency = Math.max(Number(process.env["BUN_TEST_CONCURRENCY"] || defaultConcurrency(), 10), 1);
-const queue = new PQueue({ concurrency: run_concurrency });
+const valgrind = !!process.env.BUN_USE_VALGRIND;
 
-var prevTmpdir = "";
 function maketemp() {
-  prevTmpdir = join(
+  var prevTmpdir = join(
     tmpdir(),
-    dirPrefix + (Date.now() | 0).toString() + "_" + ((Math.random() * 100_000_0) | 0).toString(36),
+    "bun-test-tmp-" + (Date.now() | 0).toString() + "_" + ((Math.random() * 100_000_0) | 0).toString(36),
   );
   mkdirSync(prevTmpdir, { recursive: true });
   return prevTmpdir;
 }
 
-const extensions = [".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".mjsx", ".cjsx", ".mtsx", ".ctsx"];
+function defaultConcurrency() {
+  // Concurrency causes more flaky tests, only enable it by default on windows
+  // See https://github.com/oven-sh/bun/issues/8071
+  if (windows) {
+    return Math.floor((cpus().length - 2) / 3);
+  }
+  return 1;
+}
+
+const run_concurrency = Math.max(Number(process.env["BUN_TEST_CONCURRENCY"] || defaultConcurrency(), 10), 1);
+
+const extensions = [".js", ".ts", ".jsx", ".tsx"];
 
 const git_sha =
   process.env["GITHUB_SHA"] ?? spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf-8" }).stdout.trim();
@@ -100,15 +110,8 @@ function* findTests(dir, query) {
   }
 }
 
-let bunExe = "bun";
-
-if (process.argv.length > 2) {
-  bunExe = resolve(process.argv.at(-1));
-} else if (process.env.BUN_PATH) {
-  const { BUN_PATH_BASE, BUN_PATH } = process.env;
-  bunExe = resolve(normalize(BUN_PATH_BASE), normalize(BUN_PATH));
-}
-
+// pick the last one, kind of a hack to allow 'bun run test bun-release' to test the release build
+let bunExe = (process.argv.length > 2 ? process.argv[process.argv.length - 1] : null) ?? "bun";
 const { error, stdout: revision_stdout } = spawnSync(bunExe, ["--revision"], {
   env: { ...process.env, BUN_DEBUG_QUIET_LOGS: 1 },
 });
@@ -177,42 +180,12 @@ function getMaxFileDescriptor(path) {
 }
 let hasInitialMaxFD = false;
 
-const activeTests = new Map();
-
-let slowTestCount = 0;
-function checkSlowTests() {
-  const now = Date.now();
-  const prevSlowTestCount = slowTestCount;
-  slowTestCount = 0;
-  for (const [path, { start, proc }] of activeTests) {
-    if (proc && now - start >= TIMEOUT_DURATION) {
-      console.error(
-        `\x1b[31merror\x1b[0;2m:\x1b[0m Killing test ${JSON.stringify(path)} after ${Math.ceil((now - start) / 1000)}s`,
-      );
-      proc?.stdout?.destroy?.();
-      proc?.stderr?.destroy?.();
-      proc?.kill?.();
-    } else if (now - start > SHORT_TIMEOUT_DURATION) {
-      console.error(
-        `\x1b[33mwarning\x1b[0;2m:\x1b[0m Test ${JSON.stringify(path)} has been running for ${Math.ceil(
-          (now - start) / 1000,
-        )}s`,
-      );
-      slowTestCount++;
-    }
-  }
-
-  if (slowTestCount > prevSlowTestCount && queue.concurrency > 1) {
-    queue.concurrency += 1;
-  }
-}
-
-setInterval(checkSlowTests, SHORT_TIMEOUT_DURATION).unref();
-var currentTestNumber = 0;
 async function runTest(path) {
-  const thisTestNumber = currentTestNumber++;
+  const tmpDir = maketemp();
+  const tmpFile = join(tmpDir, "test-metadata.json");
   const name = path.replace(cwd, "").slice(1);
   let exitCode, signal, err, output;
+  let metadata = {};
 
   const expected_crash_reason = windows
     ? await readFile(resolve(path), "utf-8").then(data => {
@@ -223,101 +196,78 @@ async function runTest(path) {
 
   const start = Date.now();
 
-  const activeTestObject = { start, proc: undefined };
-  activeTests.set(path, activeTestObject);
+  metadata.name = name;
+  metadata.t0 = [start, performance.now()];
+  await new Promise((finish, reject) => {
+    const chunks = [];
 
-  try {
-    await new Promise((finish, reject) => {
-      const chunks = [];
-      process.stderr.write(
-        `
-at ${((start - run_start.getTime()) / 1000).toFixed(2)}s, file ${thisTestNumber
-          .toString()
-          .padStart(total.toString().length, "0")}/${total}, ${failing_tests.length} failing files
-Starting "${name}"
-
-`,
-      );
-      const TMPDIR = maketemp();
-      const proc = spawn(bunExe, ["test", resolve(path)], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          FORCE_COLOR: "1",
-          BUN_GARBAGE_COLLECTOR_LEVEL: "1",
-          BUN_JSC_forceRAMSize: force_ram_size,
-          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
-          GITHUB_ACTIONS: process.env.GITHUB_ACTIONS ?? "true",
-          BUN_DEBUG_QUIET_LOGS: "1",
-          [windows ? "TEMP" : "TMPDIR"]: TMPDIR,
-        },
-      });
-      activeTestObject.proc = proc;
-      proc.stdout.once("end", () => {
-        done();
-      });
-
-      let doneCalls = 0;
-      var done = () => {
-        // TODO: wait for stderr as well
-        // spawn.test currently causes it to hang
-        if (doneCalls++ === 1) {
-          actuallyDone();
-        }
-      };
-      var actuallyDone = function () {
-        actuallyDone = done = () => {};
-        proc?.stderr?.unref?.();
-        proc?.stdout?.unref?.();
-        proc?.unref?.();
-        output = Buffer.concat(chunks).toString();
-        finish();
-      };
-
-      // if (!KEEP_TMPDIR)
-      //   proc.once("close", () => {
-      //     rm(TMPDIR, { recursive: true, force: true }).catch(() => {});
-      //   });
-
-      proc.stdout.on("data", chunk => {
-        chunks.push(chunk);
-        if (run_concurrency === 1) process.stdout.write(chunk);
-      });
-      proc.stderr.on("data", chunk => {
-        chunks.push(chunk);
-        if (run_concurrency === 1) process.stderr.write(chunk);
-      });
-
-      proc.once("close", () => {
-        activeTestObject.proc = undefined;
-      });
-
-      proc.once("exit", (code_, signal_) => {
-        activeTestObject.proc = undefined;
-        exitCode = code_;
-        signal = signal_;
-        if (signal || exitCode !== 0) {
-          actuallyDone();
-        } else {
-          done();
-        }
-      });
-      proc.once("error", err_ => {
-        activeTestObject.proc = undefined;
-        err = err_;
-        actuallyDone();
-      });
+    const valgrind_args = valgrind ? ["valgrind", "--num-callers=500", "--track-origins=yes"] : [];
+    const valgrind_env = valgrind ? {
+      "BUN_JSC_disableGC": "1",
+      "BUN_JSC_useDFGJIT": "0",
+    } : {
+      BUN_GARBAGE_COLLECTOR_LEVEL: "1",
+    };
+    const proc = spawn("time", ["-f", `{"elapsed":%e,"cpu-kernel":%S,"cpu-user":%U,"maxrss_kb":%M,"avgrss_kb":%t,"avgtotal_kb":%K,"fs_in":%I,"fs_out":%O,"sock_received":%r,"sock_sent":%s}`, "-o", tmpFile, ...valgrind_args, bunExe, "test", "--timeout", "180000", resolve(path)], {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 1000 * 60 * 3,
+      env: {
+        ...process.env,
+	...valgrind_env,
+        FORCE_COLOR: "1",
+        BUN_JSC_forceRAMSize: force_ram_size,
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+        // reproduce CI results locally
+        GITHUB_ACTIONS: process.env.GITHUB_ACTIONS ?? "true",
+        BUN_DEBUG_QUIET_LOGS: "1",
+        TMPDIR: maketemp(),
+      },
     });
-  } finally {
-    activeTests.delete(path);
-  }
+    proc.stdout.once("end", () => {
+      done();
+    });
+
+    let doneCalls = 0;
+    let done = () => {
+      // TODO: wait for stderr as well
+      // spawn.test currently causes it to hang
+      if (doneCalls++ == 1) {
+        actuallyDone();
+      }
+    };
+    function actuallyDone() {
+      output = Buffer.concat(chunks).toString();
+      finish();
+    }
+
+    proc.stdout.on("data", chunk => {
+      chunks.push(chunk);
+      if (run_concurrency === 1) process.stdout.write(chunk);
+    });
+    proc.stderr.on("data", chunk => {
+      chunks.push(chunk);
+      if (run_concurrency === 1) process.stderr.write(chunk);
+    });
+
+    proc.once("exit", (code_, signal_) => {
+      metadata.t1 = [Date.now(), performance.now()];
+      exitCode = code_;
+      signal = signal_;
+      done();
+    });
+    proc.once("error", err_ => {
+      err = err_;
+      done = () => {};
+      actuallyDone();
+    });
+  });
 
   if (!hasInitialMaxFD) {
     getMaxFileDescriptor();
   } else if (maxFd > 0) {
     const prevMaxFd = maxFd;
     maxFd = getMaxFileDescriptor();
-    if (maxFd > prevMaxFd + queue.concurrency * 2) {
+    if (maxFd > prevMaxFd) {
       process.stderr.write(
         `\n\x1b[31mewarn\x1b[0;2m:\x1b[0m file descriptor leak in ${name}, delta: ${
           maxFd - prevMaxFd
@@ -326,6 +276,8 @@ Starting "${name}"
     }
   }
 
+  metadata.time = JSON.parse(readFileSync(tmpFile, "utf-8"));
+  rmSync(tmpFile);
   const passed = exitCode === 0 && !err && !signal;
 
   let reason = "";
@@ -361,6 +313,7 @@ Starting "${name}"
     }
   }
 
+  metadata.reason = reason || undefined;
   const duration = (Date.now() - start) / 1000;
 
   if (run_concurrency !== 1 && enableProgressBar) {
@@ -392,7 +345,6 @@ Starting "${name}"
     }
 
     failing_tests.push({ path: name, reason, output, expected_crash_reason });
-    process.exitCode = 1;
     if (err) console.error(err);
   } else {
     if (windows && expected_crash_reason !== null) {
@@ -402,36 +354,79 @@ Starting "${name}"
     passing_tests.push(name);
   }
 
-  return passed;
+  console.log("METADATA: " + JSON.stringify(metadata));
+
+  metadata.walltime_ms = metadata.t1[0] - metadata.t0[0];
+  metadata.perftime_ms = metadata.t1[1] - metadata.t0[1];
+  return metadata;
 }
 
-var finished = 0;
+let queue = [...findTests(resolve(cwd, "test"))];
+{
+    let map = {};
+    queue = queue.sort((a,b) => {
+        map[a] ||= Math.random();
+	map[b] ||= Math.random();
+	return map[b] - map[a];
+    });
+}
+
+{
+    const metadata = JSON.parse(readFileSync("test-metadata.json", "utf-8"));
+    const walltime = new Map();
+    for (const {name, perftime_ms} of metadata) {
+        walltime.set(name, perftime_ms);
+    }
+    queue = queue.sort((a,b) => {
+       a = a.replace(cwd, "").slice(1);
+       b = b.replace(cwd, "").slice(1);
+       return (walltime.get(b) || 0) - (walltime.get(a) || 0);
+    });
+}
+let running = 0;
+let total = queue.length;
+let finished = 0;
+let on_entry_finish = null;
+let metadata = [];
 
 function writeProgressBar() {
   const barWidth = Math.min(process.stdout.columns || 40, 80) - 2;
-  const percent = (finished / total) * 100;
-  const bar = "=".repeat(Math.floor(percent / 2));
-  const str1 = `[${finished}/${total}] [${bar}`;
-  process.stdout.write(`\r${str1}${" ".repeat(barWidth - str1.length)}]`);
+  const str1 = `[${finished}/${total}] [`;
+  const bar = "=".repeat(Math.floor((barWidth - str1.length) * (finished / total)));
+  const str2 = str1 + bar;
+  process.stdout.write(`\r${str2}${" ".repeat(barWidth - str2.length)}]`);
 }
 
-const allTests = [...findTests(resolve(cwd, "test"))];
-console.log(`Starting ${allTests.length} tests with ${run_concurrency} concurrency...`);
-let total = allTests.length;
-for (const path of allTests) {
-  queue.add(
-    async () =>
-      await runTest(path).catch(e => {
-        console.error("Bug in bun-internal-test");
-        console.error(e);
-        process.exit(1);
-      }),
-  );
+while (queue.length > 0) {
+  if (running >= run_concurrency) {
+    await new Promise(resolve => (on_entry_finish = resolve));
+    continue;
+  }
+
+  const path = queue.shift();
+  running++;
+  console.log("running " + path + " " + `${finished} / ${total}`);
+  runTest(path)
+    .then(m => metadata.push(m))
+    .catch(e => {
+      console.error("Bug in bun-internal-test");
+      console.error(e);
+      process.exit(1);
+    })
+    .finally(() => {
+      running--;
+      if (on_entry_finish) {
+        on_entry_finish();
+        on_entry_finish = null;
+      }
+    });
 }
-await queue.onIdle();
-console.log(`
-Completed ${total} tests with ${failing_tests.length} failing tests
-`);
+while (running > 0) {
+  await Promise.race([
+    new Promise(resolve => (on_entry_finish = resolve)),
+    new Promise(resolve => setTimeout(resolve, 1000)),
+  ]);
+}
 console.log("\n");
 
 function linkToGH(linkTo) {
@@ -562,6 +557,10 @@ writeFileSync(
     fixes,
     regressions,
   }),
+);
+writeFileSync(
+  "test-metadata.json",
+  JSON.stringify(metadata, undefined, 4),
 );
 
 console.log("-> test-report.md, test-report.json");
