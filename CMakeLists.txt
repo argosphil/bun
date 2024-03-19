@@ -41,10 +41,10 @@ message(STATUS "Configuring Bun ${Bun_VERSION} in ${BUN_WORKDIR}")
 
 # --- Build Type ---
 if(NOT CMAKE_BUILD_TYPE)
-    message(WARNING "No CMAKE_BUILD_TYPE value specified, defaulting to Debug.\nSet a build type with -DCMAKE_BUILD_TYPE=<Debug|Release>")
-    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build (Debug, Release)" FORCE)
+    message(WARNING "No CMAKE_BUILD_TYPE value specified, defaulting to Debug.\nSet a build type with -DCMAKE_BUILD_TYPE=<Debug|Release|BuildFast|Valgrind>")
+    set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose the type of build (Debug, Release, BuildFast, Valgrind)" FORCE)
 else()
-    if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release)$")
+    if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release|BuildFast|Valgrind)$")
         message(FATAL_ERROR
             "Invalid CMAKE_BUILD_TYPE value specified: ${CMAKE_BUILD_TYPE}\n"
             "CMAKE_BUILD_TYPE must be Debug or Release.")
@@ -63,6 +63,34 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(DEBUG OFF)
     set(DEFAULT_ZIG_OPTIMIZE "ReleaseFast")
+
+    if(WIN32)
+        # lld-link will strip it for you, so we can build directly to bun.exe
+        set(bun "bun")
+
+        # TODO(@paperdave): Remove this
+        # it is enabled for the time being to make sure to catch more bugs in the experimental windows builds
+        set(DEFAULT_ZIG_OPTIMIZE "ReleaseSafe")
+    else()
+        set(bun "bun-profile")
+    endif()
+elseif(CMAKE_BUILD_TYPE STREQUAL "BuildFast")
+    set(DEBUG OFF)
+    set(DEFAULT_ZIG_OPTIMIZE "Debug")
+
+    if(WIN32)
+        # lld-link will strip it for you, so we can build directly to bun.exe
+        set(bun "bun")
+
+        # TODO(@paperdave): Remove this
+        # it is enabled for the time being to make sure to catch more bugs in the experimental windows builds
+        set(DEFAULT_ZIG_OPTIMIZE "ReleaseSafe")
+    else()
+        set(bun "bun-profile")
+    endif()
+elseif(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+    set(DEBUG OFF)
+    set(DEFAULT_ZIG_OPTIMIZE "Debug")
 
     if(WIN32)
         # lld-link will strip it for you, so we can build directly to bun.exe
@@ -278,7 +306,7 @@ endif()
 if(UNIX AND NOT APPLE)
     execute_process(COMMAND grep -w "NAME" /etc/os-release OUTPUT_VARIABLE LINUX_DISTRO)
 
-    if(${LINUX_DISTRO} MATCHES "NAME=\"(Arch|Manjaro|Artix) Linux\"|NAME=\"openSUSE Tumbleweed\"\n")
+    if(${LINUX_DISTRO} MATCHES "NAME=\"(Arch|Manjaro|Artix) Linux\"\n")
         set(DEFAULT_USE_STATIC_LIBATOMIC OFF)
     endif()
 endif()
@@ -305,7 +333,9 @@ option(USE_DEBUG_JSC "Enable assertions and use a debug build of JavaScriptCore"
 option(USE_UNIFIED_SOURCES "Use unified sources to speed up the build" OFF)
 option(USE_STATIC_LIBATOMIC "Statically link libatomic, requires the presence of libatomic.a" ${DEFAULT_USE_STATIC_LIBATOMIC})
 
-option(USE_LTO "Enable Link-Time Optimization" ${DEFAULT_LTO})
+if(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+    set(USE_VALGRIND ON)
+endif()
 
 if(USE_VALGRIND)
     # Disable SIMD
@@ -465,6 +495,21 @@ else()
     set(libWTF "libWTF")
 endif()
 
+set(ASSERT_ENABLED "0")
+
+if(USE_DEBUG_JSC)
+    add_compile_definitions("BUN_DEBUG=1")
+    set(ASSERT_ENABLED "1")
+elseif(CMAKE_BUILD_TYPE STREQUAL "BuildFast")
+    add_compile_definitions("RELEASE_WITHOUT_OPTIMIZATIONS=1")
+    set(ASSERT_ENABLED "0")
+elseif(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+    add_compile_definitions("RELEASE_WITHOUT_OPTIMIZATIONS=1")
+    set(ASSERT_ENABLED "0")
+elseif(NOT DEBUG AND NOT WIN32)
+    set(ASSERT_ENABLED "0")
+endif()
+
 if(NOT WEBKIT_DIR)
     set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "")
     set(ASSERT_ENABLED "0")
@@ -473,15 +518,22 @@ if(NOT WEBKIT_DIR)
         add_compile_definitions("BUN_DEBUG=1")
         set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "-debug")
         set(ASSERT_ENABLED "1")
-    elseif(NOT DEBUG AND NOT WIN32)
-        # Avoid waiting for LTO in local release builds outside of CI
-        if(USE_LTO)
-            set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "-lto")
-        else()
-            set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "")
-        endif()
-
+    elseif(CMAKE_BUILD_TYPE STREQUAL "BuildFast")
+        add_compile_definitions("RELEASE_WITHOUT_OPTIMIZATIONS=1")
+        set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "")
         set(ASSERT_ENABLED "0")
+    elseif(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+        add_compile_definitions("RELEASE_WITHOUT_OPTIMIZATIONS=1")
+        set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "")
+        set(ASSERT_ENABLED "0")
+    elseif(NOT DEBUG AND NOT WIN32)
+        set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "-lto")
+        set(ASSERT_ENABLED "0")
+    endif()
+
+    if(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+        add_compile_definitions("RELEASE_WITHOUT_OPTIMIZATIONS=1")
+        set(BUN_WEBKIT_PACKAGE_NAME_SUFFIX "")
     endif()
 
     if(WIN32)
@@ -1010,14 +1062,8 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 
     add_compile_definitions("BUN_DEBUG=1")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(LTO_FLAG "")
-
     if(NOT WIN32)
-        if(USE_LTO)
-            list(APPEND LTO_FLAG "-flto=full" "-emit-llvm")
-        endif()
-
-        target_compile_options(${bun} PUBLIC -O3 ${LTO_FLAG} -g1
+        target_compile_options(${bun} PUBLIC -O3 -g1
             -Werror=return-type
             -Werror=return-stack-address
             -Werror=implicit-function-declaration
@@ -1025,16 +1071,30 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
             -Werror
         )
     else()
-        set(LTO_LINK_FLAG "")
-
-        if(USE_LTO)
-            # -emit-llvm seems to not be supported or under a different name on Windows.
-            list(APPEND LTO_FLAG "-flto=full")
-            list(APPEND LTO_LINK_FLAG "/LTCG")
-        endif()
-
-        target_compile_options(${bun} PUBLIC /O2 ${LTO_FLAG} /DEBUG /Z7)
-        target_link_options(${bun} PUBLIC ${LTO_LINK_FLAG} /DEBUG)
+        target_compile_options(${bun} PUBLIC /O2 /DEBUG /Z7)
+        target_link_options(${bun} PUBLIC /LTCG /DEBUG)
+    endif()
+elseif(CMAKE_BUILD_TYPE STREQUAL "BuildFast")
+    if(NOT WIN32)
+        target_compile_options(${bun} PUBLIC -O0 -g0
+            -Werror=return-type
+            -Werror=return-stack-address
+            -Werror=implicit-function-declaration
+        )
+    else()
+        target_compile_options(${bun} PUBLIC /O2 /DEBUG /Z7)
+        target_link_options(${bun} PUBLIC /LTCG /DEBUG)
+    endif()
+elseif(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+    if(NOT WIN32)
+        target_compile_options(${bun} PUBLIC -O0 -g
+            -Werror=return-type
+            -Werror=return-stack-address
+            -Werror=implicit-function-declaration
+        )
+    else()
+        target_compile_options(${bun} PUBLIC /O2 /DEBUG /Z7)
+        target_link_options(${bun} PUBLIC /LTCG /DEBUG)
     endif()
 endif()
 
@@ -1165,7 +1225,21 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT WIN32 AND NOT ASSERT_ENABLED)
     add_custom_command(
         TARGET ${bun}
         POST_BUILD
-        COMMAND ${STRIP} -s -x -S -o ${BUN_WORKDIR}/bun ${BUN_WORKDIR}/${bun}
+        COMMAND cp ${BUN_WORKDIR}/${bun} ${BUN_WORKDIR}/bun
+        COMMENT "Stripping Symbols"
+    )
+elseif(CMAKE_BUILD_TYPE STREQUAL "BuildFast" AND NOT WIN32 AND NOT ASSERT_ENABLED)
+    add_custom_command(
+        TARGET ${bun}
+        POST_BUILD
+        COMMAND cp ${BUN_WORKDIR}/${bun} ${BUN_WORKDIR}/bun
+        COMMENT "Stripping Symbols"
+    )
+elseif(CMAKE_BUILD_TYPE STREQUAL "Valgrind" AND NOT WIN32 AND NOT ASSERT_ENABLED)
+    add_custom_command(
+        TARGET ${bun}
+        POST_BUILD
+        COMMAND cp ${BUN_WORKDIR}/${bun} ${BUN_WORKDIR}/bun
         COMMENT "Stripping Symbols"
     )
 endif()
@@ -1246,12 +1320,13 @@ if(USE_CUSTOM_MIMALLOC)
             target_link_libraries(${bun} PRIVATE "${BUN_DEPS_OUT_DIR}/libmimalloc.a")
         endif()
     else()
-        if(USE_DEBUG_JSC OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+        if(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
+	    # mimalloc checks for double frees by looking at freed data, causing false positives
+            target_link_libraries(${bun} PRIVATE "${BUN_DEPS_OUT_DIR}/libmimalloc.a")
+	else()
             message(STATUS "Using debug mimalloc")
             target_link_libraries(${bun} PRIVATE "${BUN_DEPS_OUT_DIR}/libmimalloc-debug.a")
-        else()
-            target_link_libraries(${bun} PRIVATE "${BUN_DEPS_OUT_DIR}/libmimalloc.o")
-        endif()
+	endif()
     endif()
 else()
     find_package(mimalloc REQUIRED)
