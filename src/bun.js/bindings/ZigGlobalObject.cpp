@@ -531,7 +531,7 @@ WTF::String Bun::formatStackTrace(JSC::VM& vm, JSC::JSGlobalObject* globalObject
             unsigned int thisLine = 0;
             unsigned int thisColumn = 0;
             frame.computeLineAndColumn(thisLine, thisColumn);
-            ZigStackFrame remappedFrame;
+            ZigStackFrame remappedFrame{};
             remappedFrame.position.line = thisLine;
             remappedFrame.position.column_start = thisColumn;
 
