@@ -1052,6 +1052,7 @@ pub const Interpreter = struct {
         };
 
         var pathbuf: [bun.MAX_PATH_BYTES]u8 = undefined;
+	@memset(pathbuf[0..bun.MAX_PATH_BYTES], 0);
         const cwd = switch (Syscall.getcwd(&pathbuf)) {
             .result => |cwd| cwd.ptr[0..cwd.len :0],
             .err => |err| {
