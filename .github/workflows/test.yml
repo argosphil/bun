@@ -33,6 +33,10 @@ on:
       tag:
         required: true
         type: string
+      timeout:
+        required: false
+        type: number
+        default: 120
 
 jobs:
   test:

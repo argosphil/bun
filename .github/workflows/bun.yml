@@ -90,3 +90,4 @@ jobs:
       target: "artifact"
       cmake_build_type: "Valgrind"
       runner: ubuntu-latest
+      timeout: 240
