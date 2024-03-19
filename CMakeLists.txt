@@ -326,6 +326,8 @@ if(CMAKE_BUILD_TYPE STREQUAL "Valgrind")
     set(USE_VALGRIND ON)
 endif()
 
+set(ARCH x86_64)
+
 if(USE_VALGRIND)
     # Disable SIMD
     set(USE_BASELINE_BUILD ON)
@@ -347,7 +349,6 @@ endif()
 
 set(ERROR_LIMIT 100 CACHE STRING "Maximum number of errors to show when compiling C++ code")
 
-set(ARCH x86_64)
 set(HOMEBREW_PREFIX "/usr/local")
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|arm")
