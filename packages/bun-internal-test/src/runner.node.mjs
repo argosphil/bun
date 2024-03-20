@@ -65,15 +65,6 @@ function maketemp() {
   return prevTmpdir;
 }
 
-function defaultConcurrency() {
-  // Concurrency causes more flaky tests, only enable it by default on windows
-  // See https://github.com/oven-sh/bun/issues/8071
-  if (windows) {
-    return Math.floor((cpus().length - 2) / 3);
-  }
-  return 1;
-}
-
 const run_concurrency = Math.max(Number(process.env["BUN_TEST_CONCURRENCY"] || defaultConcurrency(), 10), 1);
 
 const extensions = [".js", ".ts", ".jsx", ".tsx"];
