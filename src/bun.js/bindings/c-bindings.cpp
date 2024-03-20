@@ -295,7 +295,7 @@ static inline void make_pos_h_l(unsigned long* pos_h, unsigned long* pos_l,
 extern "C" ssize_t sys_preadv2(int fd, const struct iovec* iov, int iovcnt,
     off_t offset, unsigned int flags)
 {
-	return syscall(SYS_preadv2, fd, iov, iovcnt, offset, offset>>32, RWF_NOWAIT);
+    return syscall(SYS_preadv2, fd, iov, iovcnt, offset, offset>>32, (long)RWF_NOWAIT);
 }
 extern "C" ssize_t sys_pwritev2(int fd, const struct iovec* iov, int iovcnt,
     off_t offset, unsigned int flags)
@@ -303,7 +303,7 @@ extern "C" ssize_t sys_pwritev2(int fd, const struct iovec* iov, int iovcnt,
     unsigned long pos_l, pos_h;
 
     make_pos_h_l(&pos_h, &pos_l, offset);
-    return syscall(__NR_pwritev2, fd, iov, iovcnt, pos_l, pos_h, flags);
+    return syscall(__NR_pwritev2, fd, iov, iovcnt, pos_l, pos_h, (unsigned long)flags);
 }
 #else
 extern "C" ssize_t preadv2(int fd, const struct iovec* iov, int iovcnt,
