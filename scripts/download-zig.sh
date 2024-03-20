@@ -81,7 +81,7 @@ fi
 rm -rf "${extract_at}"
 mkdir -p "${extract_at}"
 tar -xf "${dest}" -C "${extract_at}" --strip-components=1
-
+tar -c src/zig | tar -x -C "${extract_at}" --strip-components=2
 echo "${url}" > "${extract_at}/.version"
 
 update_repo_if_needed
