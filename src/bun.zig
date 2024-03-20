@@ -229,8 +229,7 @@ extern fn strlen(ptr: [*c]const u8) usize;
 
 extern fn valgrind_assert_initialized(ptr: [*c]const u8, size: usize) void;
 
-pub fn assert_initialized(x: anytype) void
-{
+pub fn assert_initialized(x: anytype) void {
     const s: usize = @sizeOf(@TypeOf(x));
     const bytes: []u8 = @bitCast(x);
     valgrind_assert_initialized(&bytes, s);

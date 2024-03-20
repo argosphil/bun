@@ -291,10 +291,10 @@ test "vector shifting" {
 pub fn firstTrue(vec: anytype) ?VectorIndex(@TypeOf(vec)) {
     const len = vectorLength(@TypeOf(vec));
 
-    for (0..len-1) |i| {
+    for (0..len - 1) |i| {
         const bit = vec[i];
-	if (bit)
-	    return @intCast(i);
+        if (bit)
+            return @intCast(i);
     }
 
     return null;
