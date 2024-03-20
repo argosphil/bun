@@ -1,20 +1,30 @@
-console.log("hello world");
-
 import * as action from "@actions/core";
 import { spawn, spawnSync } from "child_process";
 import { rmSync, writeFileSync, readFileSync, mkdirSync, openSync, close, closeSync } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, rm } from "fs/promises";
 import { readdirSync } from "node:fs";
 import { resolve, basename } from "node:path";
-import { cpus, hostname, tmpdir, totalmem, userInfo } from "os";
-import { join } from "path";
+import { constants, cpus, hostname, tmpdir, totalmem, userInfo } from "os";
+import { join, normalize } from "path";
 import { fileURLToPath } from "url";
+import PQueue from "p-queue";
 
+const run_start = new Date();
 const TIMEOUT_DURATION = 1000 * 60 * 5;
 const SHORT_TIMEOUT_DURATION = Math.ceil(TIMEOUT_DURATION / 5);
 
-const windows = process.platform === "win32";
+function defaultConcurrency() {
+  // This causes instability due to the number of open file descriptors / sockets in some tests
+  // Windows has higher limits
+  if (process.platform !== "win32") {
+    return 1;
+  }
 
+  return Math.min(Math.floor((cpus().length - 2) / 2), 2);
+}
+
+const windows = process.platform === "win32";
+const KEEP_TMPDIR = process.env["BUN_KEEP_TMPDIR"] === "1";
 const nativeMemory = totalmem();
 const force_ram_size_input = parseInt(process.env["BUN_JSC_forceRAMSize"] || "0", 10);
 let force_ram_size = Number(BigInt(nativeMemory) >> BigInt(2)) + "";
@@ -40,8 +50,6 @@ uncygwinTempDir();
 
 const cwd = resolve(fileURLToPath(import.meta.url), "../../../../");
 process.chdir(cwd);
-
-console.log({cwd});
 
 const ci = !!process.env["GITHUB_ACTIONS"];
 const enableProgressBar = !ci;
@@ -257,7 +265,7 @@ async function runTest(path) {
   } else if (maxFd > 0) {
     const prevMaxFd = maxFd;
     maxFd = getMaxFileDescriptor();
-    if (maxFd > prevMaxFd) {
+    if (maxFd > prevMaxFd + queue.concurrency * 2) {
       process.stderr.write(
         `\n\x1b[31mewarn\x1b[0;2m:\x1b[0m file descriptor leak in ${name}, delta: ${
           maxFd - prevMaxFd
