@@ -227,6 +227,15 @@ pub inline fn cast(comptime To: type, value: anytype) To {
 
 extern fn strlen(ptr: [*c]const u8) usize;
 
+extern fn valgrind_assert_initialized(ptr: [*c]const u8, size: usize) void;
+
+pub fn assert_initialized(x: anytype) void
+{
+    const s: usize = @sizeOf(@TypeOf(x));
+    const bytes: []u8 = @bitCast(x);
+    valgrind_assert_initialized(&bytes, s);
+}
+
 pub fn indexOfSentinel(comptime Elem: type, comptime sentinel: Elem, ptr: [*:sentinel]const Elem) usize {
     if (Elem == u8 and sentinel == 0) {
         return strlen(ptr);
