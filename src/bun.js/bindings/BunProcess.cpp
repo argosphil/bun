@@ -1856,17 +1856,21 @@ JSC_DEFINE_HOST_FUNCTION(Process_functiongetgroups, (JSGlobalObject * globalObje
     Vector<gid_t> groupVector(ngroups);
     getgroups(1, &egid);
     bool needsEgid = true;
-    for (unsigned i = 0; i < ngroups; i++) {
-        auto current = groupVector[i];
-        if (current == needsEgid) {
-            needsEgid = false;
-        }
+    if (getgroups(ngroups, &groupVector[0]) != ngroups) {
+	throwSystemError(throwScope, globalObject, "getgroups"_s, errno);
+    }
 
-        groups->putDirectIndex(globalObject, i, jsNumber(current));
+    for (unsigned i = 0; i < ngroups; i++) {
+	auto current = groupVector[i];
+	if (current == egid) {
+	    needsEgid = false;
+	}
+
+	groups->putDirectIndex(globalObject, i, jsNumber(current));
     }
 
     if (needsEgid)
-        groups->push(globalObject, jsNumber(egid));
+	groups->push(globalObject, jsNumber(egid));
 
     return JSValue::encode(groups);
 }
