@@ -323,9 +323,7 @@ struct us_internal_ssl_socket_t *
 ssl_on_close(struct us_internal_ssl_socket_t *s, int code, void *reason) {
   struct us_internal_ssl_socket_context_t *context =
       (struct us_internal_ssl_socket_context_t *)us_socket_context(0, &s->s);
-  if (s->pending_handshake) {
-    s->pending_handshake = 0;
-  }
+  s->pending_handshake = 0;
   SSL_free(s->ssl);
 
   return context->on_close(s, code, reason);
@@ -333,7 +331,7 @@ ssl_on_close(struct us_internal_ssl_socket_t *s, int code, void *reason) {
 
 struct us_internal_ssl_socket_t *
 ssl_on_end(struct us_internal_ssl_socket_t *s) {
-  if (s && s->pending_handshake) {
+  if (s) {
     s->pending_handshake = 0;
   }
   // whatever state we are in, a TCP FIN is always an answered shutdown
@@ -1933,6 +1931,7 @@ struct us_internal_ssl_socket_t *us_internal_ssl_socket_wrap_with_tls(
   socket->ssl = NULL;
   socket->ssl_write_wants_read = 0;
   socket->ssl_read_wants_write = 0;
+  socket->pending_handshake = 0;
 
   return socket;
 }
