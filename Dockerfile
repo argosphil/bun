@@ -149,7 +149,7 @@ COPY src/zig ${BUN_DIR}/src/zig
 
 ADD $ZIG_URL .
 RUN tar xf ${ZIG_FILENAME} \
-  && tar -c ${BUN_DIR}/src/zig | tar -x -C "${ZIG_FOLDERNAME}" --strip-components=2 &
+  && tar -c ${BUN_DIR}/src/zig | tar -x -C "${ZIG_FOLDERNAME}" --strip-components=2 \
   && mv ${ZIG_FOLDERNAME}/lib /usr/lib/zig \
   && mv ${ZIG_FOLDERNAME}/zig /usr/bin/zig \
   && rm -rf ${ZIG_FILENAME} ${ZIG_FOLDERNAME}
