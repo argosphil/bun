@@ -1165,6 +1165,7 @@ pub const BundleV2 = struct {
             instance.queue = .{};
             instance.waker = null;
             instance.queue.push(completion);
+            instance.generation = 0;
             BundleThread.instance = instance;
 
             var thread = try std.Thread.spawn(.{}, generateInNewThreadWrap, .{instance});
