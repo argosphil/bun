@@ -171,6 +171,7 @@ let hasInitialMaxFD = false;
 
 async function runTest(path) {
   const tmpDir = maketemp();
+  const tmpDir2 = maketemp();
   const tmpFile = join(tmpDir, "test-metadata.json");
   const name = path.replace(cwd, "").slice(1);
   let exitCode, signal, err, output;
@@ -209,7 +210,7 @@ async function runTest(path) {
         // reproduce CI results locally
         GITHUB_ACTIONS: process.env.GITHUB_ACTIONS ?? "true",
         BUN_DEBUG_QUIET_LOGS: "1",
-        TMPDIR: maketemp(),
+        TMPDIR: tmpDir2,
       },
     });
     proc.stdout.once("end", () => {
@@ -270,6 +271,12 @@ async function runTest(path) {
     rmSync(tmpFile);
   } catch (e) {
     metadata.time = {};
+  }
+
+  try {
+    rmSync(tmpDir, { recursive: true });
+    rmSync(tmpDir2, { recursive: true });
+  } catch (e) {
   }
   const passed = exitCode === 0 && !err && !signal;
 
