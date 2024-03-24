@@ -5272,6 +5272,8 @@ pub const NodeFS = struct {
         }
 
         buf.items.len = if (comptime string_type == .null_terminated) total + 1 else total;
+	if (comptime string_type == .null_terminated)
+            buf.items.ptr[total] = '\0';
         if (total == 0) {
             buf.deinit();
             return switch (args.encoding) {
