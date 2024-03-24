@@ -1055,7 +1055,7 @@ pub fn lastIndexOfScalar(comptime T: type, slice: []const T, value: T) ?usize {
 pub fn indexOfScalarPos(comptime T: type, slice: []const T, start_index: usize, value: T) ?usize {
     if (start_index >= slice.len) return null;
 
-    var i: usize = start_index;
+    const i: usize = start_index;
 
     for (slice[i..], i..) |c, j| {
         if (c == value) return j;
