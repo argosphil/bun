@@ -1057,7 +1057,7 @@ pub const max_count = switch (builtin.os.tag) {
 
 pub fn write(fd: bun.FileDescriptor, bytes: []const u8) Maybe(usize) {
     const adjusted_len = @min(max_count, bytes.len);
-    var debug_timer = bun.Output.DebugTimer.start();
+    const debug_timer = bun.Output.DebugTimer.start();
 
     return switch (Environment.os) {
         .mac => {
@@ -2130,7 +2130,7 @@ pub fn readNonblocking(fd: bun.FileDescriptor, buf: []u8) Maybe(usize) {
                 .iov_base = buf.ptr,
                 .iov_len = buf.len,
             }};
-            var debug_timer = bun.Output.DebugTimer.start();
+            const debug_timer = bun.Output.DebugTimer.start();
 
             // Note that there is a bug on Linux Kernel 5
             const rc = C.sys_preadv2(@intCast(fd.int()), &iovec, 1, -1, linux.RWF.NOWAIT);
@@ -2171,7 +2171,7 @@ pub fn writeNonblocking(fd: bun.FileDescriptor, buf: []const u8) Maybe(usize) {
                 .iov_len = buf.len,
             }};
 
-            var debug_timer = bun.Output.DebugTimer.start();
+            const debug_timer = bun.Output.DebugTimer.start();
 
             const rc = C.sys_pwritev2(@intCast(fd.int()), &iovec, 1, -1, linux.RWF.NOWAIT);
 
