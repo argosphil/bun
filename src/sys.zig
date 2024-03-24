@@ -1059,14 +1059,6 @@ pub fn write(fd: bun.FileDescriptor, bytes: []const u8) Maybe(usize) {
     const adjusted_len = @min(max_count, bytes.len);
     var debug_timer = bun.Output.DebugTimer.start();
 
-    defer {
-        if (comptime Environment.isDebug) {
-            if (debug_timer.timer.read() > std.time.ns_per_ms) {
-                bun.Output.debugWarn("write({}, {d}) blocked for {}", .{ fd, bytes.len, debug_timer });
-            }
-        }
-    }
-
     return switch (Environment.os) {
         .mac => {
             const rc = system.@"write$NOCANCEL"(fd.cast(), bytes.ptr, adjusted_len);
@@ -2145,10 +2137,6 @@ pub fn readNonblocking(fd: bun.FileDescriptor, buf: []u8) Maybe(usize) {
 
             if (comptime Environment.isDebug) {
                 log("preadv2({}, {d}) = {d} ({})", .{ fd, buf.len, rc, debug_timer });
-
-                if (debug_timer.timer.read() > std.time.ns_per_ms) {
-                    bun.Output.debugWarn("preadv2({}, {d}) blocked for {}", .{ fd, buf.len, debug_timer });
-                }
             }
 
             if (Maybe(usize).errnoSysFd(rc, .read, fd)) |err| {
@@ -2189,10 +2177,6 @@ pub fn writeNonblocking(fd: bun.FileDescriptor, buf: []const u8) Maybe(usize) {
 
             if (comptime Environment.isDebug) {
                 log("pwritev2({}, {d}) = {d} ({})", .{ fd, buf.len, rc, debug_timer });
-
-                if (debug_timer.timer.read() > std.time.ns_per_ms) {
-                    bun.Output.debugWarn("pwritev2({}, {d}) blocked for {}", .{ fd, buf.len, debug_timer });
-                }
             }
 
             if (Maybe(usize).errnoSysFd(rc, .write, fd)) |err| {
