@@ -379,7 +379,7 @@ try {
     }
 } catch (e) {
 }
-{
+if (0) {
     queue = queue.sort((a,b) => {
        a = a.replace(cwd, "").slice(1);
        b = b.replace(cwd, "").slice(1);
