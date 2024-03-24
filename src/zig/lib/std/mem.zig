@@ -1056,56 +1056,6 @@ pub fn indexOfScalarPos(comptime T: type, slice: []const T, start_index: usize, 
     if (start_index >= slice.len) return null;
 
     var i: usize = start_index;
-    if (backend_supports_vectors and
-        !@inComptime() and
-        (@typeInfo(T) == .Int or @typeInfo(T) == .Float) and std.math.isPowerOfTwo(@bitSizeOf(T)))
-    {
-        if (std.simd.suggestVectorSize(T)) |block_len| {
-            // For Intel Nehalem (2009) and AMD Bulldozer (2012) or later, unaligned loads on aligned data result
-            // in the same execution as aligned loads. We ignore older arch's here and don't bother pre-aligning.
-            //
-            // Use `std.simd.suggestVectorSize(T)` to get the same alignment as used in this function
-            // however this usually isn't necessary unless your arch has a performance penalty due to this.
-            //
-            // This may differ for other arch's. Arm for example costs a cycle when loading across a cache
-            // line so explicit alignment prologues may be worth exploration.
-
-            // Unrolling here is ~10% improvement. We can then do one bounds check every 2 blocks
-            // instead of one which adds up.
-            const Block = @Vector(block_len, T);
-            if (i + 2 * block_len < slice.len) {
-                const mask: Block = @splat(value);
-                while (true) {
-                    inline for (0..2) |_| {
-                        const block: Block = slice[i..][0..block_len].*;
-                        const matches = block == mask;
-                        if (@reduce(.Or, matches)) {
-                            return i + std.simd.firstTrue(matches).?;
-                        }
-                        i += block_len;
-                    }
-                    if (i + 2 * block_len >= slice.len) break;
-                }
-            }
-
-            // {block_len, block_len / 2} check
-            inline for (0..2) |j| {
-                const block_x_len = block_len / (1 << j);
-                comptime if (block_x_len < 4) break;
-
-                const BlockX = @Vector(block_x_len, T);
-                if (i + block_x_len < slice.len) {
-                    const mask: BlockX = @splat(value);
-                    const block: BlockX = slice[i..][0..block_x_len].*;
-                    const matches = block == mask;
-                    if (@reduce(.Or, matches)) {
-                        return i + std.simd.firstTrue(matches).?;
-                    }
-                    i += block_x_len;
-                }
-            }
-        }
-    }
 
     for (slice[i..], i..) |c, j| {
         if (c == value) return j;
